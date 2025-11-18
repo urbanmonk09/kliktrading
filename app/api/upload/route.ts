@@ -3,41 +3,63 @@ import { NextResponse } from "next/server";
 import formidable from "formidable";
 import fs from "fs";
 
-// Disable Next.js default body parsing
+// ⚠️ This is the correct way to disable Next.js body parsing in the App Router.
+// You export a configuration object defining the max body size, 
+// which is necessary when using libraries like formidable.
 export const config = {
   api: {
     bodyParser: false,
   },
 };
 
+// Next.js App Router route handlers must be a standard async function that returns a Response.
+// We DO NOT need to wrap it in a new Promise().
 export async function POST(req: Request) {
-  return new Promise((resolve) => {
-    const form = new formidable.IncomingForm();
+  // 1. Instantiate formidable inside the handler
+  const form = formidable({});
+  
+  // Use try/catch for proper error handling
+  try {
+    // 2. Parse the request using the promise-based method (recommended pattern)
+    // Note: We cast req as any for formidable due to Next.js Request object differences.
+    const [fields, files] = await form.parse(req as any);
 
-    form.parse(req as any, async (err: Error | null, fields: any, files: any) => {
-      if (err) return resolve(NextResponse.json({ error: err.message }, { status: 500 }));
+    const fileArray = files.file;
 
-      if (!files.file) return resolve(NextResponse.json({ error: "No file uploaded" }, { status: 400 }));
+    // Check if a file was actually uploaded. Formidable returns an array of files.
+    if (!fileArray || fileArray.length === 0) {
+      return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
+    }
 
-      const file = files.file;
-      const fileStream = fs.readFileSync(file.filepath);
-      const fileName = `${Date.now()}_${file.originalFilename}`;
+    // Get the first file object
+    const file = fileArray[0];
+    const fileStream = fs.readFileSync(file.filepath);
+    const fileName = `${Date.now()}_${file.originalFilename}`;
 
-      // Upload file to Supabase Storage
-      const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
-        .from("your-bucket-name") // <-- replace with your bucket
-        .upload(`uploads/${fileName}`, fileStream);
+    // 3. Upload file to Supabase Storage
+    const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
+      .from("your-bucket-name") // <-- replace with your bucket
+      .upload(`uploads/${fileName}`, fileStream);
 
-      if (uploadError) {
-        return resolve(NextResponse.json({ error: (uploadError as any).message || "Upload failed" }, { status: 500 }));
-      }
+    if (uploadError) {
+      console.error("Supabase Upload Error:", uploadError);
+      return NextResponse.json(
+        { error: uploadError.message || "Upload failed" }, 
+        { status: 500 }
+      );
+    }
 
-      // Get public URL (no error returned)
-      const { data: urlData } = supabaseAdmin.storage
-        .from("your-bucket-name")
-        .getPublicUrl(`uploads/${fileName}`);
+    // 4. Get public URL (no error returned)
+    const { data: urlData } = supabaseAdmin.storage
+      .from("your-bucket-name")
+      .getPublicUrl(`uploads/${fileName}`);
 
-      resolve(NextResponse.json({ url: urlData.publicUrl }));
-    });
-  });
+    // 5. Return the final successful response
+    return NextResponse.json({ url: urlData.publicUrl });
+    
+  } catch (err: any) {
+    console.error("Formidable Parsing Error:", err);
+    // Return a 500 status on any general processing error
+    return NextResponse.json({ error: err.message || "Internal server error during processing." }, { status: 500 });
+  }
 }
