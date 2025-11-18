@@ -1,0 +1,34 @@
+Yes, even when deploying to a **Hostinger VPS** using **Coolify** via a **Git repository upload**, you **must** use a **`.dockerignore`** file.
+
+Here's why and how it helps in your specific setup:
+
+-----
+
+## 🚀 Why `.dockerignore` is Essential
+
+When Coolify detects your Git repository and starts the build process on your VPS, it essentially performs a Docker build using the source code it pulls.
+
+  * **1. Faster Deployment:** When you don't use `.dockerignore`, Docker copies *every single file* in your project directory (including `node_modules`, `.git` folders, logs, etc.) to the build context. The `.dockerignore` file tells Docker to skip these large, unnecessary directories, making the initial file transfer much faster.
+  * **2. Smaller Build Context:** It keeps the build context small. Since your deployment environment is a VPS, you want to minimize the data transfer and processing load.
+  * **3. Prevents Errors:** Directories like the local **`node_modules`** are often built for your local operating system (e.g., Windows/macOS). Including them in the build can cause conflicts and errors when the Docker build tries to run steps like `yarn install` or `npm install` inside the Linux-based container. The multi-stage `Dockerfile` (like the one provided earlier) handles dependencies correctly inside the container, so you must exclude the host's `node_modules`.
+
+-----
+
+## 📝 `.dockerignore` Example for Your Project
+
+You can use the exact same `.dockerignore` content provided previously in the root of your project:
+
+```
+# Dependency/Build Directories
+node_modules
+.next
+out
+
+# Version Control
+.git
+.gitignore
+
+# Logs and Temporary files
+npm-debug.log
+.DS_Store
+```
