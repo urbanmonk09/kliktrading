@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState, useMemo, useRef, useContext } from "react";
 import Link from "next/link";
-import Fuse from "fuse.js";
 
 import StockCard from "../../components/StockCard";
 import { fetchStockData } from "../../src/api/fetchStockData";
@@ -314,14 +313,8 @@ export default function Watchlist() {
     .sort((a, b) => (b?.timestamp ?? 0) - (a?.timestamp ?? 0))
     .slice(0, 2);
 
-  const fuseIndex = useMemo(() => {
-    const options: Fuse.IFuseOptions<StockDisplay> = {
-      keys: ["symbol"],
-      threshold: 0.35,
-      includeScore: true,
-    };
-    return new Fuse(combinedSorted, options);
-  }, [combinedSorted.length]);
+  // ---- SEARCH: replaced Fuse with a simple local search index ----
+  const searchIndex = useMemo(() => combinedSorted, [combinedSorted.length]);
 
   const handleSearch = (term?: string) => {
     const isPro = Boolean((user as any)?.isPro);
@@ -338,7 +331,10 @@ export default function Watchlist() {
       return;
     }
 
-    const results = fuseIndex.search(rawTerm, { limit: 100 }).map((r) => r.item);
+    const results = searchIndex
+      .filter((item) => item.symbol.toLowerCase().includes(rawTerm))
+      .slice(0, 100);
+
     const catFiltered =
       category === "all" ? results : results.filter((r) => r.type === category);
 
@@ -434,7 +430,11 @@ export default function Watchlist() {
                     setSearch(e.target.value);
                     const isPro = Boolean((user as any)?.isPro);
                     if (isPro && e.target.value.trim().length > 0) {
-                      const res = fuseIndex.search(e.target.value, { limit: 6 }).map((r) => r.item);
+                      const res = searchIndex
+                        .filter((item) =>
+                          item.symbol.toLowerCase().includes(e.target.value.toLowerCase())
+                        )
+                        .slice(0, 6);
                       const catFiltered = category === "all" ? res : res.filter((r) => r.type === category);
                       setSuggestions(catFiltered.slice(0, 6));
                     } else {
