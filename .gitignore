@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+
+# Add this line to prevent accidental committing of the disabled middleware
+middleware_disabled.ts
+# OR if it is in src/
+src/middleware_disabled.ts
