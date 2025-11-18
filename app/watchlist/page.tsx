@@ -9,11 +9,9 @@ import { fetchStockData } from "../../src/api/fetchStockData";
 import { symbols as allSymbols } from "@/src/api/symbols";
 import { generateSMCSignal, StockDisplay } from "@/src/utils/xaiLogic";
 import { AuthContext } from "../../src/context/AuthContext";
-import NotificationToast from "../../components/NotificationToast";
 
 import {
   getUserTrades as getUserTradesFromFirestore,
-  // saveTradeToFirestore // keep if you want to save trades from here
 } from "../../src/firebase/firestoreActions";
 import {
   getUserWatchlist,
@@ -37,20 +35,13 @@ export default function Watchlist() {
   const { user } = useContext(AuthContext);
   const userEmail = (user as any)?.email ?? (user as any)?.emailAddress ?? "";
 
-  // Live prices cache
   const [livePrices, setLivePrices] = useState<
     Record<string, { price: number; previousClose: number; lastUpdated: number }>
   >({});
-
-  // Saved trades (from Firestore)
   const [savedTrades, setSavedTrades] = useState<any[]>([]);
-
-  // User watchlist items (from Firestore)
   const [userWatchlist, setUserWatchlist] = useState<
     { id: string; userEmail: string; symbol: string; type: SymbolType }[]
   >([]);
-
-  // UI/search states
   const [search, setSearch] = useState("");
   const [filteredResults, setFilteredResults] = useState<StockDisplay[]>([]);
   const [suggestions, setSuggestions] = useState<StockDisplay[]>([]);
@@ -60,8 +51,6 @@ export default function Watchlist() {
   const [toast, setToast] = useState<{ msg: string; bg?: string } | null>(null);
   const suggestionsRef = useRef<HTMLDivElement | null>(null);
 
-  // ------------------------------
-  // Helper: map API symbol (yahoo-friendly)
   const apiSymbol = (symbol: string) => {
     if (symbol === "BTC/USD") return "BTC-USD";
     if (symbol === "ETH/USD") return "ETH-USD";
@@ -69,8 +58,6 @@ export default function Watchlist() {
     return symbol;
   };
 
-  // ------------------------------
-  // Load saved trades from Firestore when userEmail available
   useEffect(() => {
     if (!userEmail) {
       setSavedTrades([]);
@@ -94,8 +81,6 @@ export default function Watchlist() {
     };
   }, [userEmail]);
 
-  // ------------------------------
-  // Load user watchlist (Firebase)
   useEffect(() => {
     if (!userEmail) {
       setUserWatchlist([]);
@@ -106,7 +91,6 @@ export default function Watchlist() {
       try {
         const wl = await getUserWatchlist(userEmail);
         if (!mounted) return;
-        // normalize type to SymbolType if necessary
         const normalized = (wl ?? []).map((w: any) => ({
           id: w.id,
           userEmail: w.userEmail,
@@ -125,13 +109,10 @@ export default function Watchlist() {
     };
   }, [userEmail]);
 
-  // ------------------------------
-  // Build combined symbol universe:
-  // defaultSymbols + file symbols + user watchlist (unique)
   const mappedExtraSymbols = allSymbols.map((s) => {
     let yahooSymbol = s.symbol;
     if (s.type === "crypto" && s.symbol.includes("BINANCE:")) {
-      const pair = s.symbol.split(":")[1]; // BTCUSDT
+      const pair = s.symbol.split(":")[1];
       const base = pair.replace("USDT", "");
       yahooSymbol = `${base}-USD`;
     }
@@ -149,18 +130,16 @@ export default function Watchlist() {
     ...userWatchlistSymbols,
   ];
 
-  // Normalize and deduplicate by symbol (case-sensitive as original)
   const uniqueSymbols = combinedSymbols.filter(
     (v, i, a) => a.findIndex((x) => x.symbol === v.symbol) === i
   );
 
-  // Symbols which are not in savedTrades (rendered as Live Prices grid)
   const symbolsWithoutTrades = uniqueSymbols.filter(
     (s) => !savedTrades.some((t: any) => t.symbol === s.symbol)
   );
 
   // ------------------------------
-  // Live price fetcher (for defaultSymbols + combinedSymbols used in page)
+  // ✅ Fully patched: Live price fetcher (only fetch fix for crypto)
   useEffect(() => {
     let isMounted = true;
 
@@ -171,19 +150,28 @@ export default function Watchlist() {
       for (const sym of allSymbolsToFetch) {
         const last = livePrices[sym]?.lastUpdated ?? 0;
         if (now - last >= REFRESH_INTERVAL) {
-         try {
-  const resp = await fetchStockData(apiSymbol(sym));  // ONLY ONE ARG
-  if (!isMounted) return;
+          try {
+            let fetchSymbol = apiSymbol(sym);
 
-  setLivePrices((prev) => ({
-    ...prev,
-    [sym]: {
-      price: resp.current ?? 0,
-      previousClose: resp.previousClose ?? resp.current ?? 0,
-      lastUpdated: now,
-    },
-  }));
-} catch (err) {
+            // Fetch crypto via Yahoo only
+            if (["BTC/USD", "ETH/USD"].includes(sym)) {
+              fetchSymbol = sym.replace("/", "-");
+            } else if (sym === "XAU/USD") {
+              fetchSymbol = "GC=F";
+            }
+
+            const resp = await fetchStockData(fetchSymbol);
+            if (!isMounted) return;
+
+            setLivePrices((prev) => ({
+              ...prev,
+              [sym]: {
+                price: resp.current ?? 0,
+                previousClose: resp.previousClose ?? resp.current ?? 0,
+                lastUpdated: now,
+              },
+            }));
+          } catch (err) {
             console.warn("Failed to fetch price", sym, err);
           }
         }
@@ -196,11 +184,10 @@ export default function Watchlist() {
       isMounted = false;
       clearInterval(interval);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(uniqueSymbols.map((s) => s.symbol)), livePrices]);
 
   // ------------------------------
-  // Build tradesWithPrices from savedTrades + livePrices (same logic you had)
+  // All other logic for trades, scoring, etc. remains untouched
   const tradesWithPrices = savedTrades.map((t: any) => {
     const live = livePrices[t.symbol] ?? { price: 0, previousClose: 0 };
     const prevClose = live.previousClose ?? t.entryPrice ?? 0;
@@ -227,8 +214,6 @@ export default function Watchlist() {
     };
   });
 
-  // ------------------------------
-  // Combined ranking logic (SMC scoring) — unchanged behaviour
   const savedTradesForScoring: StockDisplay[] = tradesWithPrices.map((t: any) => {
     const stockInput = {
       symbol: t.symbol,
@@ -319,9 +304,6 @@ export default function Watchlist() {
     }
   }
 
-  // ------------------------------
-  // PREVIOUS TARGET-HIT TRADES (take two most recent)
-  // savedTrades may contain a status field (e.g. 'target_hit') or hitStatus
   const previousTargetHits = [...savedTrades]
     .filter(
       (t) =>
@@ -332,8 +314,6 @@ export default function Watchlist() {
     .sort((a, b) => (b?.timestamp ?? 0) - (a?.timestamp ?? 0))
     .slice(0, 2);
 
-  // ------------------------------
-  // Fuse.js fuzzy index (memoized on dataset length — same behaviour)
   const fuseIndex = useMemo(() => {
     const options: Fuse.IFuseOptions<StockDisplay> = {
       keys: ["symbol"],
@@ -341,11 +321,8 @@ export default function Watchlist() {
       includeScore: true,
     };
     return new Fuse(combinedSorted, options);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [combinedSorted.length]);
 
-  // ------------------------------
-  // Search logic (fuzzy + category) with Pro gating
   const handleSearch = (term?: string) => {
     const isPro = Boolean((user as any)?.isPro);
 
@@ -380,8 +357,6 @@ export default function Watchlist() {
     setSuggestions([]);
   };
 
-  // ------------------------------
-  // UI helpers: add/remove watchlist (calls Firestore then refresh local state)
   const handleAddToWatchlist = async (symbol: string, type: SymbolType = "stock") => {
     if (!userEmail) {
       setToast({ msg: "Please login to add to watchlist.", bg: "bg-red-600" });
@@ -414,8 +389,6 @@ export default function Watchlist() {
     }
   };
 
-  // ------------------------------
-  // Suggestions click outside handler
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
       if (!suggestionsRef.current) return;
@@ -427,19 +400,14 @@ export default function Watchlist() {
     return () => document.removeEventListener("click", onDocClick);
   }, []);
 
-  // Clear toast after timeout
   useEffect(() => {
     if (!toast) return;
     const id = setTimeout(() => setToast(null), 3500);
     return () => clearTimeout(id);
   }, [toast]);
 
-  // ------------------------------
-  // Helper to normalize symbols for dedupe when rendering lists
   const normalizeForKey = (s: string) => s.replace(/\s+/g, "_").replace(/\//g, "-");
 
-  // ------------------------------
-  // Render
   return (
     <div className="p-6 bg-gray-100 min-h-screen">
       {/* Back to Home + Title */}
@@ -524,7 +492,7 @@ export default function Watchlist() {
             </div>
           </div>
 
-          {/* If searching, show filtered */}
+          {/* SEARCH RESULTS */}
           {filteredResults.length > 0 && (
             <div className="mb-6">
               <h3 className="text-lg font-semibold mb-2">Search Results</h3>
@@ -536,7 +504,7 @@ export default function Watchlist() {
             </div>
           )}
 
-          {/* TOP 5 */}
+          {/* TOP 5 TRADES */}
           {topFive.length > 0 && (
             <div className="mb-6">
               <h3 className="text-lg font-semibold mb-2">🔥 Top Trades</h3>
@@ -548,14 +516,13 @@ export default function Watchlist() {
             </div>
           )}
 
-          {/* PREVIOUS TARGET HITS (2 recent from DB) */}
+          {/* PREVIOUS TARGET HITS */}
           {previousTargetHits.length > 0 && (
             <div className="mb-6">
               <h3 className="text-lg font-semibold mb-2">🏁 Recent Target Hits</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {previousTargetHits.map((t, idx) => {
                   const key = (t._id ?? `${t.symbol}-${t.timestamp ?? idx}`) as string;
-                  // Map the DB trade to StockDisplay-compatible props for StockCard
                   const display: StockDisplay = {
                     symbol: t.symbol,
                     signal: t.direction === "long" ? "BUY" : t.direction === "short" ? "SELL" : "HOLD",
@@ -587,7 +554,7 @@ export default function Watchlist() {
             </div>
           )}
 
-          {/* Remaining Trades */}
+          {/* REMAINING TRADES */}
           {remainingTrades.length > 0 && (
             <div className="mb-6">
               <h3 className="text-lg font-semibold mb-2">All Other Trades</h3>
@@ -600,7 +567,7 @@ export default function Watchlist() {
             </div>
           )}
 
-          {/* Live Prices for symbols without trades */}
+          {/* LIVE PRICES */}
           {symbolsWithoutTrades.length > 0 && (
             <div className="mt-6">
               <h3 className="text-lg font-semibold mb-2">Live Prices</h3>

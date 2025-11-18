@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState, useRef } from "react";
 import StockCard from "../components/StockCard";
-import { fetchStockData } from "../src/api/fetchStockData";
 import { generateSMCSignal, StockDisplay } from "../src/utils/xaiLogic";
 import NotificationToast from "../components/NotificationToast";
 import { useRouter } from "next/navigation";
@@ -12,7 +11,7 @@ import { supabase } from "../src/lib/supabaseClient";
 
 // ⭐ Supabase helpers
 import saveTradeToSupabase from "@/src/supabase/trades";
-import { getUserTrades, getTargetHitTrades } from "@/src/supabase/getUserTrades"; // <-- added helper
+import { getUserTrades, getTargetHitTrades } from "@/src/supabase/getUserTrades";
 
 // Home screen symbols
 const homeSymbols = {
@@ -36,50 +35,43 @@ export default function Home() {
 
   const [supabaseUser, setSupabaseUser] = useState<any>(null);
   const [savedTrades, setSavedTrades] = useState<any[]>([]);
-  const [targetHitTrade, setTargetHitTrade] = useState<any | null>(null); // ⭐ NEW
+  const [targetHitTrade, setTargetHitTrade] = useState<any | null>(null);
 
   const lastSignalsRef = useRef<Record<string, string>>({});
   const router = useRouter();
 
+  const userEmail = supabaseUser?.email ?? "";
+
   // ----------------------------------------------------
-  // ⭐ Supabase Auth Listener
+  // Supabase Auth Listener
   // ----------------------------------------------------
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data }) => {
       if (data?.user) {
         setSupabaseUser(data.user);
-
         const trades = await getUserTrades(data.user.email!);
         setSavedTrades(trades);
-
-        // ⭐ Fetch one previous target-hit trade
         const prevHit = await getTargetHitTrades(data.user.email!);
         if (prevHit.length > 0) setTargetHitTrade(prevHit[0]);
       }
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        if (session?.user) {
-          setSupabaseUser(session.user);
-
-          const trades = await getUserTrades(session.user.email!);
-          setSavedTrades(trades);
-
-          const prevHit = await getTargetHitTrades(session.user.email!);
-          if (prevHit.length > 0) setTargetHitTrade(prevHit[0]);
-        } else {
-          setSupabaseUser(null);
-          setSavedTrades([]);
-          setTargetHitTrade(null);
-        }
+    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        setSupabaseUser(session.user);
+        const trades = await getUserTrades(session.user.email!);
+        setSavedTrades(trades);
+        const prevHit = await getTargetHitTrades(session.user.email!);
+        if (prevHit.length > 0) setTargetHitTrade(prevHit[0]);
+      } else {
+        setSupabaseUser(null);
+        setSavedTrades([]);
+        setTargetHitTrade(null);
       }
-    );
+    });
 
     return () => listener.subscription.unsubscribe();
   }, []);
-
-  const userEmail = supabaseUser?.email ?? "";
 
   // ----------------------------------------------------
   // Load Last Signal Cache
@@ -104,11 +96,9 @@ export default function Home() {
   };
 
   // ----------------------------------------------------
-  // Fetch Live Prices
+  // Fetch Live Prices from Server
   // ----------------------------------------------------
-  useEffect(() => {
-    let isMounted = true;
-
+  const fetchLivePrices = async () => {
     const allSymbols = [
       ...homeSymbols.stock,
       ...homeSymbols.index,
@@ -116,42 +106,33 @@ export default function Home() {
       ...homeSymbols.commodity,
     ];
 
-    const fetchAllPrices = async () => {
+    try {
+      const response = await fetch(`/api/prices?symbols=${allSymbols.map(apiSymbol).join(",")}`);
+      const data: Record<string, { price: number; previousClose: number }> = await response.json();
+
       const now = Date.now();
+      const updatedPrices: typeof livePrices = {};
 
-      for (const symbol of allSymbols) {
-        const last = livePrices[symbol]?.lastUpdated ?? 0;
-        if (now - last < REFRESH_INTERVAL) continue;
+      allSymbols.forEach((symbol) => {
+        const apiSym = apiSymbol(symbol);
+        updatedPrices[symbol] = {
+          price: data[apiSym]?.price ?? 0,
+          previousClose: data[apiSym]?.previousClose ?? 0,
+          lastUpdated: now,
+        };
+      });
 
-         try {
-    // We are only using Yahoo now
-    const response = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`
-    );
-    const json = await response.json();
+      setLivePrices(updatedPrices);
+    } catch {
+      setToast({ msg: "Failed to fetch live prices", bg: "bg-red-500" });
+    }
+  };
 
-    const result = {
-      current: json.chart?.result?.[0]?.meta?.regularMarketPrice ?? 0,
-      previousClose: json.chart?.result?.[0]?.meta?.chartPreviousClose ?? 0,
-    };
-
-    return result;
-  } catch {
-          setToast({
-            msg: `Failed fetching ${symbol}`,
-            bg: "bg-red-500",
-          });
-        }
-      }
-    };
-
-    fetchAllPrices();
-    const interval = setInterval(fetchAllPrices, 10000);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, [livePrices]);
+  useEffect(() => {
+    fetchLivePrices();
+    const interval = setInterval(fetchLivePrices, 10000); // refresh every 10s
+    return () => clearInterval(interval);
+  }, []);
 
   // ----------------------------------------------------
   // Save Trade + Notify
@@ -236,10 +217,7 @@ export default function Home() {
           const prevClose = live?.previousClose ?? 0;
           const currentPrice = live?.price ?? prevClose;
 
-          const smc = generateSMCSignal({
-            current: currentPrice,
-            previousClose: prevClose,
-          });
+          const smc = generateSMCSignal({ current: currentPrice, previousClose: prevClose });
 
           const stoploss =
             smc.signal === "BUY"
@@ -282,16 +260,9 @@ export default function Home() {
 
           if (prevHitTrade) stock.hitStatus = "TARGET ✅";
 
-          if (!bestSymbol || stock.confidence > bestSymbol.confidence)
-            bestSymbol = stock;
+          if (!bestSymbol || stock.confidence > bestSymbol.confidence) bestSymbol = stock;
 
-          await maybeNotifyAndSave(
-            stock.symbol,
-            "yahoo",
-            { ...smc, stoploss, targets },
-            prevClose,
-            currentPrice
-          );
+          await maybeNotifyAndSave(stock.symbol, "yahoo", { ...smc, stoploss, targets }, prevClose, currentPrice);
         } catch {}
       }
 
@@ -340,9 +311,7 @@ export default function Home() {
       return;
     }
 
-    const filtered = stockData.filter((s) =>
-      s.symbol.toLowerCase().includes(term)
-    );
+    const filtered = stockData.filter((s) => s.symbol.toLowerCase().includes(term));
     setSearchResults(filtered);
   };
 
@@ -351,13 +320,8 @@ export default function Home() {
   // ----------------------------------------------------
   return (
     <div className="p-6 bg-gray-100 min-h-screen">
-
       {toast && (
-        <NotificationToast
-          message={toast.msg}
-          bg={toast.bg}
-          onClose={() => setToast(null)}
-        />
+        <NotificationToast message={toast.msg} bg={toast.bg} onClose={() => setToast(null)} />
       )}
 
       {/* Watchlist */}
@@ -382,18 +346,15 @@ export default function Home() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search signal for stock and crypto only for Pro member"
-          disabled={!supabaseUser}  // ⭐ LOCKED
+          disabled={!supabaseUser}
           className={`flex-1 p-2 rounded border ${
             !supabaseUser ? "bg-gray-300 cursor-not-allowed" : "bg-white"
           }`}
         />
-
         <button
           onClick={handleSearch}
           className={`px-4 py-2 rounded text-white ${
-            supabaseUser
-              ? "bg-blue-500 hover:bg-blue-600"
-              : "bg-gray-500 cursor-not-allowed"
+            supabaseUser ? "bg-blue-500 hover:bg-blue-600" : "bg-gray-500 cursor-not-allowed"
           }`}
         >
           Search
