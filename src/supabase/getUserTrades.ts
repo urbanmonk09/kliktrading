@@ -1,3 +1,5 @@
+// src/supabase/getUserTrades.ts
+
 import { supabase } from "../lib/supabaseClient";
 
 export interface TradeRecord {
@@ -14,11 +16,12 @@ export interface TradeRecord {
   provider: string;
   note: string;
   timestamp: number;
+  hit_timestamp?: number | null;
 }
 
-// --------------------------------------------------
-// ⭐ Fetch ALL Trades for user
-// --------------------------------------------------
+// ---------------------------------------------
+// ⭐ Fetch ALL Trades for a user
+// ---------------------------------------------
 export async function getUserTrades(email: string): Promise<TradeRecord[]> {
   try {
     const { data, error } = await supabase
@@ -28,38 +31,38 @@ export async function getUserTrades(email: string): Promise<TradeRecord[]> {
       .order("timestamp", { ascending: false });
 
     if (error) {
-      console.error("🔴 Supabase Fetch Error (getUserTrades):", error.message);
+      console.error("🔴 Supabase Fetch Error (getUserTrades):", error);
       return [];
     }
 
     return data ?? [];
-  } catch (err: any) {
-    console.error("🔥 Unexpected Error (getUserTrades):", err?.message || err);
+  } catch (err) {
+    console.error("🔥 Unexpected Error (getUserTrades):", err);
     return [];
   }
 }
 
-// --------------------------------------------------
-// ⭐ Fetch LAST 2 Trades where target was hit
-// --------------------------------------------------
+// ---------------------------------------------
+// ⭐ Fetch the last 2 Trades where target was hit
+// ---------------------------------------------
 export async function getTargetHitTrades(userEmail: string) {
   try {
     const { data, error } = await supabase
       .from("trades")
       .select("*")
-      .eq("user_email", userEmail)          // FIXED COLUMN NAME
-      .eq("status", "target_hit")           // TARGET HIT FILTER
+      .eq("user_email", userEmail)
+      .eq("status", "target_hit")
       .order("timestamp", { ascending: false })
       .limit(2);
 
     if (error) {
-      console.error("🔴 Supabase Error (targetHitTrades):", error.message);
+      console.error("🔴 Supabase Error (targetHitTrades):", error);
       return [];
     }
 
     return data ?? [];
-  } catch (err: any) {
-    console.error("🔥 Unexpected Error (targetHitTrades):", err?.message || err);
+  } catch (err) {
+    console.error("🔥 Unexpected Error (targetHitTrades):", err);
     return [];
   }
 }

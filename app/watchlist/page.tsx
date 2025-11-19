@@ -9,9 +9,10 @@ import { symbols as allSymbols } from "@/src/api/symbols";
 import { generateSMCSignal, StockDisplay } from "@/src/utils/xaiLogic";
 import { AuthContext } from "../../src/context/AuthContext";
 
-import {
-  getUserTrades as getUserTradesFromFirestore,
-} from "../../src/firebase/firestoreActions";
+// Supabase helpers (used for trades & target-hit trades)
+import { getUserTrades, getTargetHitTrades } from "@/src/supabase/getUserTrades";
+
+// Firestore-based watchlist helpers remain as-is (you still use Firestore for watchlist)
 import {
   getUserWatchlist,
   addToWatchlist,
@@ -38,6 +39,7 @@ export default function Watchlist() {
     Record<string, { price: number; previousClose: number; lastUpdated: number }>
   >({});
   const [savedTrades, setSavedTrades] = useState<any[]>([]);
+  const [targetHitTrades, setTargetHitTrades] = useState<any[]>([]); // NEW: fetch previous target-hit trades from Supabase
   const [userWatchlist, setUserWatchlist] = useState<
     { id: string; userEmail: string; symbol: string; type: SymbolType }[]
   >([]);
@@ -57,20 +59,25 @@ export default function Watchlist() {
     return symbol;
   };
 
+  // ------------------------------
+  // Fetch user trades from Supabase (replaces Firestore call)
+  // ------------------------------
   useEffect(() => {
     if (!userEmail) {
       setSavedTrades([]);
+      setTargetHitTrades([]);
       return;
     }
 
     let mounted = true;
     (async () => {
       try {
-        const trades = await getUserTradesFromFirestore(userEmail);
+        // Active / all trades for scoring
+        const trades = await getUserTrades(userEmail);
         if (!mounted) return;
         setSavedTrades(trades ?? []);
       } catch (err) {
-        console.error("Failed to load trades from Firestore", err);
+        console.error("Failed to load trades from Supabase", err);
         setSavedTrades([]);
       }
     })();
@@ -80,6 +87,35 @@ export default function Watchlist() {
     };
   }, [userEmail]);
 
+  // ------------------------------
+  // Fetch previous target-hit trades (from Supabase)
+  // ------------------------------
+  useEffect(() => {
+    if (!userEmail) {
+      setTargetHitTrades([]);
+      return;
+    }
+
+    let mounted = true;
+    (async () => {
+      try {
+        const hits = await getTargetHitTrades(userEmail); // returns last 2 (or modify to return more if needed)
+        if (!mounted) return;
+        setTargetHitTrades(hits ?? []);
+      } catch (err) {
+        console.error("Failed to load target hit trades from Supabase", err);
+        setTargetHitTrades([]);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [userEmail]);
+
+  // ------------------------------
+  // Load user watchlist from Firestore (unchanged)
+  // ------------------------------
   useEffect(() => {
     if (!userEmail) {
       setUserWatchlist([]);
@@ -303,15 +339,21 @@ export default function Watchlist() {
     }
   }
 
-  const previousTargetHits = [...savedTrades]
-    .filter(
-      (t) =>
-        t?.status === "target_hit" ||
-        t?.hitStatus === "TARGET ✅" ||
-        (t?.resolved && t?.finalPrice)
-    )
-    .sort((a, b) => (b?.timestamp ?? 0) - (a?.timestamp ?? 0))
-    .slice(0, 2);
+  // ------------------------------
+  // PREVIOUS TARGET HITS
+  // Prefer explicit targetHitTrades fetched from Supabase; fall back to savedTrades filter
+  // Show up to 3 previous target hits
+  // ------------------------------
+  const previousTargetHits = (targetHitTrades && targetHitTrades.length > 0
+    ? [...targetHitTrades]
+    : [...savedTrades].filter(
+        (t) =>
+          t?.status === "target_hit" ||
+          t?.hitStatus === "TARGET ✅" ||
+          (t?.resolved && t?.finalPrice)
+      ))
+    .sort((a: any, b: any) => (b?.hit_timestamp ?? b?.timestamp ?? 0) - (a?.hit_timestamp ?? a?.timestamp ?? 0))
+    .slice(0, 3); // top 3
 
   // ---- SEARCH: replaced Fuse with a simple local search index ----
   const searchIndex = useMemo(() => combinedSorted, [combinedSorted.length]);
@@ -522,17 +564,18 @@ export default function Watchlist() {
               <h3 className="text-lg font-semibold mb-2">🏁 Recent Target Hits</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {previousTargetHits.map((t, idx) => {
-                  const key = (t._id ?? `${t.symbol}-${t.timestamp ?? idx}`) as string;
+                  const key = (t.id ?? t._id ?? `${t.symbol}-${t.timestamp ?? idx}`) as string;
                   const display: StockDisplay = {
                     symbol: t.symbol,
                     signal: t.direction === "long" ? "BUY" : t.direction === "short" ? "SELL" : "HOLD",
                     confidence: t.confidence ?? 0,
                     explanation: t.note ?? t.explanation ?? "",
-                    price: t.finalPrice ?? t.entryPrice ?? 0,
+                    // prefer hit_price or finalPrice, fallback to entry_price
+                    price: t.hit_price ?? t.finalPrice ?? t.entry_price ?? t.entryPrice ?? 0,
                     type: t.type ?? ("stock" as const),
                     support: t.support ?? 0,
                     resistance: t.resistance ?? 0,
-                    stoploss: t.stopLoss ?? t.stoploss ?? 0,
+                    stoploss: t.stop_loss ?? t.stoploss ?? 0,
                     targets: t.targets ?? [],
                     hitStatus: "TARGET ✅",
                   };
@@ -560,7 +603,7 @@ export default function Watchlist() {
               <h3 className="text-lg font-semibold mb-2">All Other Trades</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {remainingTrades.map((t, idx) => {
-                  const key = (t._id ?? `${t.symbol}-${t.timestamp ?? idx}`) as string;
+                  const key = (t.id ?? t._id ?? `${t.symbol}-${t.timestamp ?? idx}`) as string;
                   return <StockCard key={`${normalizeForKey(key)}-rem-${idx}`} {...t} />;
                 })}
               </div>
