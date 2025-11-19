@@ -135,7 +135,7 @@ export default function Home() {
   }, []);
 
   // ----------------------------------------------------
-  // Save Trade + Notify
+  // Save Trade + Notify (UPDATED)
   // ----------------------------------------------------
   const maybeNotifyAndSave = async (
     symbol: string,
@@ -176,8 +176,17 @@ export default function Home() {
       bg: normalizedSignal === "BUY" ? "bg-green-600" : "bg-red-600",
     });
 
-    if (supabaseUser?.email) {
-      await saveTradeToSupabase({
+    if (supabaseUser?.email && currentPrice !== undefined) {
+      // Determine trade status based on targets/stoploss
+      let status: "active" | "target_hit" | "stop_loss" = "active";
+
+      if (trade.targets && currentPrice >= Math.max(...trade.targets)) {
+        status = "target_hit";
+      } else if (trade.stoploss && currentPrice <= trade.stoploss) {
+        status = "stop_loss";
+      }
+
+      const savedTrade = await saveTradeToSupabase({
         userEmail,
         symbol,
         type: symbol.startsWith("^")
@@ -190,11 +199,16 @@ export default function Home() {
         stopLoss: trade.stoploss ?? undefined,
         targets: trade.targets ?? undefined,
         confidence: trade.confidence ?? 0,
-        status: "active",
+        status,
         provider,
         note: trade.explanation ?? "",
         timestamp: Date.now(),
       });
+
+      // Update local savedTrades immediately if target/stoploss is hit
+      if (savedTrade && (status === "target_hit" || status === "stop_loss")) {
+        setSavedTrades((prev) => [savedTrade, ...prev]);
+      }
     }
   };
 

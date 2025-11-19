@@ -1,4 +1,4 @@
-import { supabase } from "../lib/supabaseClient";
+import { supabase } from "@/src/lib/supabaseClient";
 
 export interface TradePayload {
   userEmail: string;
@@ -9,15 +9,34 @@ export interface TradePayload {
   stopLoss?: number;
   targets?: number[];
   confidence: number;
-  status: string;
+  status: "active" | "target_hit" | "stop_loss";
   provider: string;
   note?: string;
   timestamp: number;
 }
 
+/**
+ * Save or update a trade in Supabase
+ * - Updates existing active trade for same user+symbol
+ * - Inserts new trade if none exists
+ */
 export default async function saveTradeToSupabase(payload: TradePayload) {
-  const { data, error } = await supabase.from("trades").insert([
-    {
+  try {
+    const { data: existingTrade, error: fetchError } = await supabase
+      .from("trades")
+      .select("*")
+      .eq("user_email", payload.userEmail)
+      .eq("symbol", payload.symbol)
+      .eq("status", "active")
+      .limit(1)
+      .single();
+
+    if (fetchError && fetchError.code !== "PGRST116") {
+      console.error("Error fetching existing trade:", fetchError);
+      return null;
+    }
+
+    const tradeData = {
       user_email: payload.userEmail,
       symbol: payload.symbol,
       type: payload.type,
@@ -30,13 +49,31 @@ export default async function saveTradeToSupabase(payload: TradePayload) {
       provider: payload.provider,
       note: payload.note ?? "",
       timestamp: payload.timestamp,
-    },
-  ]);
+      hit_timestamp: payload.status !== "active" ? Date.now() : null,
+    };
 
-  if (error) {
-    console.error("Supabase Save Error:", error);
+    if (existingTrade?.id) {
+      const { data, error } = await supabase
+        .from("trades")
+        .update(tradeData)
+        .eq("id", existingTrade.id)
+        .select();
+
+      if (error) {
+        console.error("Error updating trade:", error);
+        return null;
+      }
+      return data?.[0] ?? null;
+    } else {
+      const { data, error } = await supabase.from("trades").insert(tradeData).select();
+      if (error) {
+        console.error("Error inserting trade:", error);
+        return null;
+      }
+      return data?.[0] ?? null;
+    }
+  } catch (err) {
+    console.error("saveTradeToSupabase catch:", err);
     return null;
   }
-
-  return data;
 }
