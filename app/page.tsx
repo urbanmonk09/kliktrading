@@ -288,12 +288,14 @@ export default function Home() {
 
           const smc = generateSMCSignal({ current: price, previousClose: prev });
 
-          const stoploss =
-            smc.signal === "BUY"
-              ? prev * 0.985
-              : smc.signal === "SELL"
-              ? prev * 1.015
-              : prev;
+          // 60% reduced stoploss
+const stoploss =
+  smc.signal === "BUY"
+    ? prev * (1 - (1 - 0.985) * 0.6) // → prev * 0.991
+    : smc.signal === "SELL"
+    ? prev * (1 + (0.015 * 0.6))     // → prev * 1.009
+    : prev;
+
 
           const targets =
             smc.signal === "BUY"
