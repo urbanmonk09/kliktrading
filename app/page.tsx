@@ -17,6 +17,15 @@ const homeSymbols = {
   commodity: ["XAU/USD"],
 };
 
+// ------------------- FIXED TIMESTAMP -------------------
+// Signal timestamp fixed for entire day
+const getSignalTimestamp = () => {
+  const now = new Date();
+  now.setHours(0, 0, 0, 0); // midnight today
+  return now.getTime();
+};
+const FIXED_SIGNAL_TIMESTAMP = getSignalTimestamp();
+
 export default function Home() {
   const [stockData, setStockData] = useState<StockDisplay[]>([]);
   const [livePrices, setLivePrices] = useState<
@@ -25,7 +34,14 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<StockDisplay[]>([]);
-  const [toast, setToast] = useState<{ msg: string; bg?: string } | null>(null);
+  const [toast, setToast] = useState<{
+    msg: string;
+    bg?: string;
+    currentPrice?: number;
+    stoploss?: number;
+    targets?: number[];
+    timestamp?: number;
+  } | null>(null);
 
   const [supabaseUser, setSupabaseUser] = useState<any>(null);
   const [savedTrades, setSavedTrades] = useState<any[]>([]);
@@ -41,10 +57,7 @@ export default function Home() {
     supabase.auth.getUser().then(async ({ data }) => {
       if (data?.user) {
         setSupabaseUser(data.user);
-
-        const t = await getUserTrades(data.user.email!);
-        setSavedTrades(t);
-
+        setSavedTrades(await getUserTrades(data.user.email!));
         const hit = await getTargetHitTrades(data.user.email!);
         if (hit.length > 0) setTargetHitTrade(hit[0]);
       }
@@ -54,10 +67,7 @@ export default function Home() {
       async (_event, session) => {
         if (session?.user) {
           setSupabaseUser(session.user);
-
-          const t = await getUserTrades(session.user.email!);
-          setSavedTrades(t);
-
+          setSavedTrades(await getUserTrades(session.user.email!));
           const hit = await getTargetHitTrades(session.user.email!);
           if (hit.length > 0) setTargetHitTrade(hit[0]);
         } else {
@@ -134,7 +144,6 @@ export default function Home() {
     hitPrice: number
   ) => {
     const norm = (s: string) => s?.replace?.(".NS", "");
-
     const clean = norm(symbol);
 
     for (const t of savedTrades) {
@@ -168,6 +177,17 @@ export default function Home() {
     lastSignalsRef.current[symbol] = normalizedSignal;
     localStorage.setItem("lastSignals", JSON.stringify(lastSignalsRef.current));
 
+    // ------------------- TOAST NOTIFICATION -------------------
+    setToast({
+      msg: `${normalizedSignal} signal on ${symbol}`,
+      bg: normalizedSignal === "BUY" ? "bg-green-600" : "bg-red-600",
+      currentPrice,
+      stoploss: trade.stoploss,
+      targets: trade.targets,
+      timestamp: FIXED_SIGNAL_TIMESTAMP,
+    });
+
+    // ------------------- BROWSER NOTIFICATION -------------------
     if (supabaseUser && "Notification" in window) {
       if (Notification.permission === "granted") {
         new Notification(`${normalizedSignal} signal - ${symbol}`);
@@ -175,11 +195,6 @@ export default function Home() {
         Notification.requestPermission();
       }
     }
-
-    setToast({
-      msg: `${normalizedSignal} signal on ${symbol}`,
-      bg: normalizedSignal === "BUY" ? "bg-green-600" : "bg-red-600",
-    });
 
     if (!supabaseUser?.email || currentPrice === undefined) return;
 
@@ -220,7 +235,7 @@ export default function Home() {
         status: "target_hit",
         provider,
         note: trade.explanation ?? "",
-        timestamp: Date.now(),
+        timestamp: FIXED_SIGNAL_TIMESTAMP,
         hitPrice: currentPrice,
         hitTargetIndex: hitIndex,
       });
@@ -248,7 +263,7 @@ export default function Home() {
       status,
       provider,
       note: trade.explanation ?? "",
-      timestamp: Date.now(),
+      timestamp: FIXED_SIGNAL_TIMESTAMP,
     });
 
     if (saved) {
@@ -338,21 +353,14 @@ export default function Home() {
         confidence: 100,
         explanation: "Previously Hit Target Trade",
         price:
-          targetHitTrade.entry_price ??
-          targetHitTrade.entryPrice ??
-          0,
+          targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
         type: "stock",
         support:
-          targetHitTrade.entry_price ??
-          targetHitTrade.entryPrice ??
-          0,
+          targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
         resistance:
-          targetHitTrade.entry_price ??
-          targetHitTrade.entryPrice ??
-          0,
+          targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
         stoploss:
-          targetHitTrade.stop_loss ??
-          targetHitTrade.stopLoss,
+          targetHitTrade.stop_loss ?? targetHitTrade.stopLoss,
         targets: targetHitTrade.targets,
         hitStatus: "TARGET ✅",
       });
@@ -370,7 +378,7 @@ export default function Home() {
   }, [
     Object.keys(livePrices).length,
     savedTrades.length,
-    targetHitTrade ? targetHitTrade.id : null
+    targetHitTrade ? targetHitTrade.id : null,
   ]);
 
   // ------------------- SEARCH -------------------
@@ -389,12 +397,15 @@ export default function Home() {
   // ------------------- RENDER -------------------
   return (
     <div className="p-6 bg-gray-100 min-h-screen">
-      
       {/* FIXED TOAST */}
       {toast && (
         <NotificationToast
-          message={toast.msg}     // ← FIX
+          message={toast.msg}
           bg={toast.bg}
+          currentPrice={toast.currentPrice}
+          stoploss={toast.stoploss}
+          targets={toast.targets}
+          timestamp={toast.timestamp}
           onClose={() => setToast(null)}
         />
       )}

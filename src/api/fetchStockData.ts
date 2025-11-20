@@ -16,14 +16,22 @@ export interface StockData {
   source?: "finnhub" | "yahoo" | "unknown";
 }
 
-// Fetch + fallback
+// Fetch + fallback + timeout
 export async function fetchStockData(symbol: string): Promise<StockData> {
   try {
+    // Timeout using Axios CancelToken
+    const source = axios.CancelToken.source();
+    const timeout = setTimeout(() => {
+      source.cancel(`Request timed out for ${symbol}`);
+    }, 15000); // 15 seconds
+
     const url = `/api/stock?symbol=${encodeURIComponent(symbol)}`;
-    const res = await axios.get(url);
+    const res = await axios.get(url, { cancelToken: source.token });
+    clearTimeout(timeout);
+
     const data = res.data as StockData;
 
-    // If market closed → fallback to previous close
+    // Use previousClose as fallback if current price is missing
     const price = data.current ?? data.previousClose ?? 0;
 
     return {
@@ -31,8 +39,13 @@ export async function fetchStockData(symbol: string): Promise<StockData> {
       current: price,
       lastUpdated: Date.now(),
     };
-  } catch (err) {
-    console.warn("fetchStockData failed", symbol, err);
+  } catch (err: any) {
+    if (axios.isCancel(err)) {
+      console.warn("fetchStockData timeout:", symbol, err.message);
+    } else {
+      console.warn("fetchStockData failed:", symbol, err);
+    }
+
     return {
       symbol,
       current: 0,
