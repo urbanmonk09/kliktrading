@@ -3,9 +3,9 @@
 import { supabase } from "@/src/lib/supabaseClient";
 
 /*
-|--------------------------------------------------------------------------
-| Interfaces
-|--------------------------------------------------------------------------
+|-------------------------------------------------------------------------- 
+| Interfaces (unchanged)
+|-------------------------------------------------------------------------- 
 */
 export interface TradePayload {
   userEmail: string;
@@ -20,45 +20,60 @@ export interface TradePayload {
   provider: string;
   note?: string;
   timestamp: number;
+
+  hitPrice?: number | null;
+  hitTargetIndex?: number | null;
 }
 
 export interface TargetHitPayload extends TradePayload {
-  hitPrice: number;           // price at which target was hit
-  hitTargetIndex: number;     // which target number was hit (1, 2, 3)
+  hitPrice: number;
+  hitTargetIndex: number;
 }
 
 /*
-|--------------------------------------------------------------------------
-| 1) Save New Trade or Update Existing Active Trade
-|--------------------------------------------------------------------------
+|-------------------------------------------------------------------------- 
+| 1) Save or Update Active Trade — FIXED
+|-------------------------------------------------------------------------- 
 */
 export default async function saveTradeToSupabase(payload: TradePayload) {
   try {
-    // ⭐ 1. Get authenticated user (Required for RLS)
     const { data: auth } = await supabase.auth.getUser();
     const supaUser = auth?.user;
-    if (!supaUser?.id) {
-      console.error("❌ No authenticated user found — cannot save trade.");
-      return null;
-    }
+    if (!supaUser?.id) return null;
 
-    // ⭐ 2. Check if an active trade already exists for this symbol
-    const { data: existingActive, error: fetchErr } = await supabase
+    // fetch existing active trade
+    const { data: existingActive } = await supabase
       .from("trades")
       .select("*")
       .eq("user_id", supaUser.id)
       .eq("symbol", payload.symbol)
       .eq("status", "active");
 
-    if (fetchErr) {
-      console.error("🔴 Error fetching existing trade:", fetchErr);
-    }
-
     const existing = existingActive?.[0] ?? null;
 
-    // ⭐ 3. Build data to insert/update
-    const tradeData = {
-      user_id: supaUser.id, // REQUIRED for RLS
+    /*
+    |------------------------------------------------------------
+    | IMPORTANT FIX
+    |------------------------------------------------------------
+    | If payload contains hitPrice or hitTargetIndex:
+    | → Do NOT update existing "active"
+    | → Insert a NEW row instead
+    |------------------------------------------------------------
+    */
+    const isTargetHit = !!payload.hitPrice || !!payload.hitTargetIndex;
+
+    if (isTargetHit) {
+      // create a new target-hit record
+      return await saveTargetHitToSupabase({
+        ...payload,
+        hitPrice: payload.hitPrice!,
+        hitTargetIndex: payload.hitTargetIndex!,
+      });
+    }
+
+    // build normal trade data
+    const tradeData: any = {
+      user_id: supaUser.id,
       user_email: payload.userEmail,
       symbol: payload.symbol,
       type: payload.type,
@@ -72,19 +87,18 @@ export default async function saveTradeToSupabase(payload: TradePayload) {
       note: payload.note ?? "",
       timestamp: payload.timestamp,
 
-      // New fields for unified schema
       hit_price: null,
       hit_target_index: null,
-      hit_timestamp: payload.status !== "active" ? Date.now() : null,
+      hit_timestamp: null,
     };
 
-    // ⭐ 4. Update existing active trade → only if status="active"
+    // update existing active trade (normal case)
     if (existing?.id) {
       const { data, error } = await supabase
         .from("trades")
         .update(tradeData)
         .eq("id", existing.id)
-        .eq("user_id", supaUser.id) // required for RLS
+        .eq("user_id", supaUser.id)
         .select();
 
       if (error) {
@@ -95,11 +109,8 @@ export default async function saveTradeToSupabase(payload: TradePayload) {
       return data?.[0] ?? null;
     }
 
-    // ⭐ 5. Insert new active trade
-    const { data, error } = await supabase
-      .from("trades")
-      .insert(tradeData)
-      .select();
+    // insert new active trade if none exist
+    const { data, error } = await supabase.from("trades").insert(tradeData).select();
 
     if (error) {
       console.error("🔴 Error inserting new trade:", error);
@@ -114,33 +125,19 @@ export default async function saveTradeToSupabase(payload: TradePayload) {
 }
 
 /*
-|--------------------------------------------------------------------------
-| 2) Save Target Hits (Insert NEW ROW for each hit)
-|--------------------------------------------------------------------------
-|
-| This creates a FULL NEW trade row with:
-|   - hit_price
-|   - hit_target_index
-|   - hit_timestamp
-|   - status = "target_hit"
-|
-| This allows the Watchlist page to show Top 2–3 previous trades.
-|--------------------------------------------------------------------------
+|-------------------------------------------------------------------------- 
+| 2) Save Target Hit — Always inserts new row (unchanged)
+|-------------------------------------------------------------------------- 
 */
 export async function saveTargetHitToSupabase(payload: TargetHitPayload) {
   try {
-    // ⭐ 1. Get auth user
     const { data: auth } = await supabase.auth.getUser();
     const supaUser = auth?.user;
 
-    if (!supaUser?.id) {
-      console.error("❌ No authenticated user found — cannot save target hit.");
-      return null;
-    }
+    if (!supaUser?.id) return null;
 
-    // ⭐ 2. Build new row
-    const tradeData = {
-      user_id: supaUser.id, // REQUIRED for RLS
+    const tradeData: any = {
+      user_id: supaUser.id,
       user_email: payload.userEmail,
       symbol: payload.symbol,
       type: payload.type,
@@ -152,21 +149,14 @@ export async function saveTargetHitToSupabase(payload: TargetHitPayload) {
       status: "target_hit",
       provider: payload.provider,
       note: payload.note ?? "",
+      timestamp: payload.timestamp ?? Date.now(),
 
-      // Original trade timestamp
-      timestamp: payload.timestamp,
-
-      // ⭐ TARGET HIT DATA ⭐
       hit_price: payload.hitPrice,
       hit_target_index: payload.hitTargetIndex,
       hit_timestamp: Date.now(),
     };
 
-    // ⭐ 3. INSERT new row (never update)
-    const { data, error } = await supabase
-      .from("trades")
-      .insert(tradeData)
-      .select();
+    const { data, error } = await supabase.from("trades").insert(tradeData).select();
 
     if (error) {
       console.error("🔴 Error inserting target hit trade:", error);

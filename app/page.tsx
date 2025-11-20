@@ -6,22 +6,16 @@ import { generateSMCSignal, StockDisplay } from "../src/utils/xaiLogic";
 import NotificationToast from "../components/NotificationToast";
 import { useRouter } from "next/navigation";
 
-// ⭐ Supabase imports
 import { supabase } from "../src/lib/supabaseClient";
-
-// ⭐ Supabase helpers
-import saveTradeToSupabase from "@/src/supabase/trades";
+import saveTradeToSupabase, { saveTargetHitToSupabase } from "@/src/supabase/trades";
 import { getUserTrades, getTargetHitTrades } from "@/src/supabase/getUserTrades";
 
-// Home screen symbols
 const homeSymbols = {
   stock: ["RELIANCE.NS", "TCS.NS", "INFY.NS"],
   index: ["^NSEI", "^NSEBANK"],
   crypto: ["BTC/USD", "ETH/USD"],
   commodity: ["XAU/USD"],
 };
-
-const REFRESH_INTERVAL = 180000; // 3 minutes
 
 export default function Home() {
   const [stockData, setStockData] = useState<StockDisplay[]>([]);
@@ -42,40 +36,42 @@ export default function Home() {
 
   const userEmail = supabaseUser?.email ?? "";
 
-  // ----------------------------------------------------
-  // Supabase Auth Listener
-  // ----------------------------------------------------
+  // ------------------- AUTH LISTENER -------------------
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data }) => {
       if (data?.user) {
         setSupabaseUser(data.user);
-        const trades = await getUserTrades(data.user.email!);
-        setSavedTrades(trades);
-        const prevHit = await getTargetHitTrades(data.user.email!);
-        if (prevHit.length > 0) setTargetHitTrade(prevHit[0]);
+
+        const t = await getUserTrades(data.user.email!);
+        setSavedTrades(t);
+
+        const hit = await getTargetHitTrades(data.user.email!);
+        if (hit.length > 0) setTargetHitTrade(hit[0]);
       }
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        setSupabaseUser(session.user);
-        const trades = await getUserTrades(session.user.email!);
-        setSavedTrades(trades);
-        const prevHit = await getTargetHitTrades(session.user.email!);
-        if (prevHit.length > 0) setTargetHitTrade(prevHit[0]);
-      } else {
-        setSupabaseUser(null);
-        setSavedTrades([]);
-        setTargetHitTrade(null);
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        if (session?.user) {
+          setSupabaseUser(session.user);
+
+          const t = await getUserTrades(session.user.email!);
+          setSavedTrades(t);
+
+          const hit = await getTargetHitTrades(session.user.email!);
+          if (hit.length > 0) setTargetHitTrade(hit[0]);
+        } else {
+          setSupabaseUser(null);
+          setSavedTrades([]);
+          setTargetHitTrade(null);
+        }
       }
-    });
+    );
 
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // ----------------------------------------------------
-  // Load Last Signal Cache
-  // ----------------------------------------------------
+  // ------------------- LOAD LAST SIGNAL CACHE -------------------
   useEffect(() => {
     try {
       if (typeof window !== "undefined") {
@@ -85,9 +81,7 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // ----------------------------------------------------
-  // API Symbol Mapping
-  // ----------------------------------------------------
+  // ------------------- SYMBOL MAPPING -------------------
   const apiSymbol = (symbol: string) => {
     if (symbol === "BTC/USD") return "BTC-USD";
     if (symbol === "ETH/USD") return "ETH-USD";
@@ -95,9 +89,7 @@ export default function Home() {
     return symbol;
   };
 
-  // ----------------------------------------------------
-  // Fetch Live Prices from Server
-  // ----------------------------------------------------
+  // ------------------- FETCH LIVE PRICES -------------------
   const fetchLivePrices = async () => {
     const allSymbols = [
       ...homeSymbols.stock,
@@ -107,22 +99,23 @@ export default function Home() {
     ];
 
     try {
-      const response = await fetch(`/api/prices?symbols=${allSymbols.map(apiSymbol).join(",")}`);
-      const data: Record<string, { price: number; previousClose: number }> = await response.json();
+      const response = await fetch(
+        `/api/prices?symbols=${allSymbols.map(apiSymbol).join(",")}`
+      );
+      const data = await response.json();
 
       const now = Date.now();
-      const updatedPrices: typeof livePrices = {};
+      const updated: any = {};
 
-      allSymbols.forEach((symbol) => {
-        const apiSym = apiSymbol(symbol);
-        updatedPrices[symbol] = {
-          price: data[apiSym]?.price ?? 0,
-          previousClose: data[apiSym]?.previousClose ?? 0,
+      allSymbols.forEach((s) => {
+        updated[s] = {
+          price: data[apiSymbol(s)]?.price ?? 0,
+          previousClose: data[apiSymbol(s)]?.previousClose ?? 0,
           lastUpdated: now,
         };
       });
 
-      setLivePrices(updatedPrices);
+      setLivePrices(updated);
     } catch {
       setToast({ msg: "Failed to fetch live prices", bg: "bg-red-500" });
     }
@@ -130,13 +123,30 @@ export default function Home() {
 
   useEffect(() => {
     fetchLivePrices();
-    const interval = setInterval(fetchLivePrices, 10000); // refresh every 10s
-    return () => clearInterval(interval);
+    const i = setInterval(fetchLivePrices, 10000);
+    return () => clearInterval(i);
   }, []);
 
-  // ----------------------------------------------------
-  // Save Trade + Notify (UPDATED)
-  // ----------------------------------------------------
+  // ------------------- DUPLICATE TARGET-HIT CHECK -------------------
+  const alreadyRecordedTargetHit = (
+    symbol: string,
+    hitIndex: number,
+    hitPrice: number
+  ) => {
+    const norm = (s: string) => s?.replace?.(".NS", "");
+
+    const clean = norm(symbol);
+
+    for (const t of savedTrades) {
+      if (norm(t.symbol) === clean && t.status === "target_hit") {
+        if (t.hit_target_index === hitIndex) return true;
+        if (t.hit_price === hitPrice) return true;
+      }
+    }
+    return false;
+  };
+
+  // ------------------- SAVE + NOTIFY -------------------
   const maybeNotifyAndSave = async (
     symbol: string,
     provider: string,
@@ -156,18 +166,13 @@ export default function Home() {
     if (lastSignalsRef.current[symbol] === normalizedSignal) return;
 
     lastSignalsRef.current[symbol] = normalizedSignal;
+    localStorage.setItem("lastSignals", JSON.stringify(lastSignalsRef.current));
 
-    if (typeof window !== "undefined") {
-      localStorage.setItem("lastSignals", JSON.stringify(lastSignalsRef.current));
-    }
-
-    if (supabaseUser && typeof window !== "undefined" && "Notification" in window) {
+    if (supabaseUser && "Notification" in window) {
       if (Notification.permission === "granted") {
-        new Notification(`${normalizedSignal} signal - ${symbol}`, {
-          body: `${symbol} ${currentPrice ?? ""}`,
-        });
+        new Notification(`${normalizedSignal} signal - ${symbol}`);
       } else if (Notification.permission !== "denied") {
-        await Notification.requestPermission();
+        Notification.requestPermission();
       }
     }
 
@@ -176,125 +181,178 @@ export default function Home() {
       bg: normalizedSignal === "BUY" ? "bg-green-600" : "bg-red-600",
     });
 
-    if (supabaseUser?.email && currentPrice !== undefined) {
-      // Determine trade status based on targets/stoploss
-      let status: "active" | "target_hit" | "stop_loss" = "active";
+    if (!supabaseUser?.email || currentPrice === undefined) return;
 
-      if (trade.targets && currentPrice >= Math.max(...trade.targets)) {
-        status = "target_hit";
-      } else if (trade.stoploss && currentPrice <= trade.stoploss) {
-        status = "stop_loss";
+    let status: "active" | "target_hit" | "stop_loss" = "active";
+
+    if (trade.targets && currentPrice >= Math.max(...trade.targets)) {
+      status = "target_hit";
+    } else if (trade.stoploss && currentPrice <= trade.stoploss) {
+      status = "stop_loss";
+    }
+
+    if (status === "target_hit") {
+      let hitIndex = 1;
+      if (Array.isArray(trade.targets)) {
+        for (let i = trade.targets.length - 1; i >= 0; i--) {
+          if (currentPrice >= trade.targets[i]) {
+            hitIndex = i + 1;
+            break;
+          }
+        }
       }
 
-      const savedTrade = await saveTradeToSupabase({
+      if (alreadyRecordedTargetHit(symbol, hitIndex, currentPrice)) return;
+
+      const saved = await saveTargetHitToSupabase({
         userEmail,
         symbol,
-        type: symbol.startsWith("^")
-          ? "index"
-          : symbol.includes("/USD") || symbol === "XAU/USD"
+        type: symbol.includes(".NS")
+          ? "stock"
+          : symbol.includes("/")
           ? "crypto"
-          : "stock",
+          : "index",
         direction: normalizedSignal === "BUY" ? "long" : "short",
         entryPrice: prevClose,
-        stopLoss: trade.stoploss ?? undefined,
-        targets: trade.targets ?? undefined,
+        stopLoss: trade.stoploss,
+        targets: trade.targets,
         confidence: trade.confidence ?? 0,
-        status,
+        status: "target_hit",
         provider,
         note: trade.explanation ?? "",
         timestamp: Date.now(),
+        hitPrice: currentPrice,
+        hitTargetIndex: hitIndex,
       });
 
-      // Update local savedTrades immediately if target/stoploss is hit
-      if (savedTrade && (status === "target_hit" || status === "stop_loss")) {
-        setSavedTrades((prev) => [savedTrade, ...prev]);
+      if (saved) {
+        setSavedTrades((p) => [saved, ...p]);
+        setTargetHitTrade(saved);
       }
+      return;
+    }
+
+    const saved = await saveTradeToSupabase({
+      userEmail,
+      symbol,
+      type: symbol.includes(".NS")
+        ? "stock"
+        : symbol.includes("/")
+        ? "crypto"
+        : "index",
+      direction: normalizedSignal === "BUY" ? "long" : "short",
+      entryPrice: prevClose,
+      stopLoss: trade.stoploss,
+      targets: trade.targets,
+      confidence: trade.confidence ?? 0,
+      status,
+      provider,
+      note: trade.explanation ?? "",
+      timestamp: Date.now(),
+    });
+
+    if (saved) {
+      setSavedTrades((p) => (p.find((x) => x.id === saved.id) ? p : [saved, ...p]));
     }
   };
 
-  // ----------------------------------------------------
-  // Load Home Data
-  // ----------------------------------------------------
+  // ------------------- LOAD DATA -------------------
   const loadData = async () => {
     setLoading(true);
+
     const out: StockDisplay[] = [];
 
-    for (const [type, symbols] of Object.entries(homeSymbols) as [
-      keyof typeof homeSymbols,
-      string[]
-    ][]) {
-      let bestSymbol: StockDisplay | null = null;
+    for (const [type, symbols] of Object.entries(homeSymbols)) {
+      let best: StockDisplay | null = null;
 
       for (const symbol of symbols) {
         try {
-          const live = livePrices[symbol];
-          const prevClose = live?.previousClose ?? 0;
-          const currentPrice = live?.price ?? prevClose;
+          const lp = livePrices[symbol];
+          const prev = lp?.previousClose ?? 0;
+          const price = lp?.price ?? prev;
 
-          const smc = generateSMCSignal({ current: currentPrice, previousClose: prevClose });
+          const smc = generateSMCSignal({ current: price, previousClose: prev });
 
           const stoploss =
             smc.signal === "BUY"
-              ? prevClose * 0.985
+              ? prev * 0.985
               : smc.signal === "SELL"
-              ? prevClose * 1.015
-              : prevClose;
+              ? prev * 1.015
+              : prev;
 
           const targets =
             smc.signal === "BUY"
-              ? [prevClose * 1.01, prevClose * 1.02, prevClose * 1.03]
+              ? [prev * 1.01, prev * 1.02, prev * 1.03]
               : smc.signal === "SELL"
-              ? [prevClose * 0.99, prevClose * 0.98, prevClose * 0.97]
-              : [prevClose];
+              ? [prev * 0.99, prev * 0.98, prev * 0.97]
+              : [prev];
 
           const stock: StockDisplay = {
             symbol: symbol.replace(".NS", ""),
             signal: smc.signal,
             confidence: smc.confidence,
             explanation: smc.explanation,
-            price: currentPrice,
-            type: type as StockDisplay["type"],
-            support: prevClose * 0.995,
-            resistance: prevClose * 1.01,
+            price,
+            type: type as any,
+            support: prev * 0.995,
+            resistance: prev * 1.01,
             stoploss,
             targets,
             hitStatus:
-              currentPrice >= Math.max(...targets)
+              price >= Math.max(...targets)
                 ? "TARGET ✅"
-                : currentPrice <= stoploss
+                : price <= stoploss
                 ? "STOP ❌"
                 : "ACTIVE",
           };
 
-          const prevHitTrade = savedTrades.find(
-            (t) =>
-              t.symbol.replace(".NS", "") === symbol.replace(".NS", "") &&
-              t.status === "target_hit"
+          if (
+            savedTrades.find(
+              (t) =>
+                t.symbol.replace(".NS", "") === symbol.replace(".NS", "") &&
+                t.status === "target_hit"
+            )
+          ) {
+            stock.hitStatus = "TARGET ✅";
+          }
+
+          if (!best || stock.confidence > best.confidence) best = stock;
+
+          await maybeNotifyAndSave(
+            stock.symbol,
+            "yahoo",
+            { ...smc, stoploss, targets },
+            prev,
+            price
           );
-
-          if (prevHitTrade) stock.hitStatus = "TARGET ✅";
-
-          if (!bestSymbol || stock.confidence > bestSymbol.confidence) bestSymbol = stock;
-
-          await maybeNotifyAndSave(stock.symbol, "yahoo", { ...smc, stoploss, targets }, prevClose, currentPrice);
         } catch {}
       }
 
-      if (bestSymbol) out.push(bestSymbol);
+      if (best) out.push(best);
     }
 
-    // ⭐ Add one previous trade from database
     if (targetHitTrade) {
       out.push({
         symbol: targetHitTrade.symbol,
         signal: "BUY",
         confidence: 100,
         explanation: "Previously Hit Target Trade",
-        price: targetHitTrade.entryPrice,
+        price:
+          targetHitTrade.entry_price ??
+          targetHitTrade.entryPrice ??
+          0,
         type: "stock",
-        support: targetHitTrade.entryPrice,
-        resistance: targetHitTrade.entryPrice,
-        stoploss: targetHitTrade.stopLoss,
+        support:
+          targetHitTrade.entry_price ??
+          targetHitTrade.entryPrice ??
+          0,
+        resistance:
+          targetHitTrade.entry_price ??
+          targetHitTrade.entryPrice ??
+          0,
+        stoploss:
+          targetHitTrade.stop_loss ??
+          targetHitTrade.stopLoss,
         targets: targetHitTrade.targets,
         hitStatus: "TARGET ✅",
       });
@@ -304,15 +362,18 @@ export default function Home() {
     setLoading(false);
   };
 
+  // ------------------- FIXED DEPENDENCIES -------------------
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 30000);
-    return () => clearInterval(interval);
-  }, [livePrices, targetHitTrade]);
+    const i = setInterval(loadData, 30000);
+    return () => clearInterval(i);
+  }, [
+    Object.keys(livePrices).length,
+    savedTrades.length,
+    targetHitTrade ? targetHitTrade.id : null
+  ]);
 
-  // ----------------------------------------------------
-  // Search (Locked for Free)
-  // ----------------------------------------------------
+  // ------------------- SEARCH -------------------
   const handleSearch = () => {
     if (!supabaseUser) {
       setToast({ msg: "Pro membership required!", bg: "bg-red-600" });
@@ -320,25 +381,24 @@ export default function Home() {
     }
 
     const term = search.trim().toLowerCase();
-    if (!term) {
-      setSearchResults(stockData);
-      return;
-    }
+    if (!term) return setSearchResults(stockData);
 
-    const filtered = stockData.filter((s) => s.symbol.toLowerCase().includes(term));
-    setSearchResults(filtered);
+    setSearchResults(stockData.filter((s) => s.symbol.toLowerCase().includes(term)));
   };
 
-  // ----------------------------------------------------
-  // Render
-  // ----------------------------------------------------
+  // ------------------- RENDER -------------------
   return (
     <div className="p-6 bg-gray-100 min-h-screen">
+      
+      {/* FIXED TOAST */}
       {toast && (
-        <NotificationToast message={toast.msg} bg={toast.bg} onClose={() => setToast(null)} />
+        <NotificationToast
+          message={toast.msg}     // ← FIX
+          bg={toast.bg}
+          onClose={() => setToast(null)}
+        />
       )}
 
-      {/* Watchlist */}
       <div className="mb-4">
         <button
           onClick={() => {
@@ -348,41 +408,35 @@ export default function Home() {
             }
             router.push("/watchlist");
           }}
-          className="bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600"
+          className="bg-yellow-500 text-white px-4 py-2 rounded"
         >
           Pro Members Watchlist
         </button>
-
-        *Educational Research Work
       </div>
 
-      {/* Search */}
       <div className="flex gap-2 mb-4">
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search signal for stock and crypto only for Pro member"
           disabled={!supabaseUser}
-          className={`flex-1 p-2 rounded border ${
-            !supabaseUser ? "bg-gray-300 cursor-not-allowed" : "bg-white"
-          }`}
+          placeholder="Search (Pro only)"
+          className="flex-1 p-2 rounded border"
         />
         <button
           onClick={handleSearch}
-          className={`px-4 py-2 rounded text-white ${
-            supabaseUser ? "bg-blue-500 hover:bg-blue-600" : "bg-gray-500 cursor-not-allowed"
-          }`}
+          className="px-4 py-2 rounded text-white bg-blue-500"
         >
           Search
         </button>
       </div>
 
-      {/* Cards */}
       {loading ? (
         <div>Loading…</div>
-      ) : (searchResults.length ? searchResults : stockData).map((s) => (
+      ) : (
+        (searchResults.length ? searchResults : stockData).map((s) => (
           <StockCard key={s.symbol} {...s} />
-        ))}
+        ))
+      )}
     </div>
   );
 }
