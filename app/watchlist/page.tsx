@@ -25,6 +25,10 @@ import {
   removeFromWatchlist,
 } from "../../src/firebase/firestoreWatchlist";
 
+// Quant AI helpers (same as Home)
+import { RL } from "../../src/quant/rlModel";
+import { applyAdaptiveConfidence, confidenceToColor } from "../../src/quant/confidenceEngine";
+
 type SymbolType = "stock" | "index" | "crypto";
 
 const defaultSymbols: { symbol: string; type: SymbolType }[] = [
@@ -36,6 +40,7 @@ const defaultSymbols: { symbol: string; type: SymbolType }[] = [
 ];
 
 const REFRESH_INTERVAL = 210000; // ~3.5 minutes - prevents exceeding API quota
+const ALERT_CONFIDENCE_THRESHOLD = 70; // default threshold (you selected "default")
 
 // ---------------- STOPLOSS CONSTANT ----------------
 const STOPLOSS_FACTOR = 0.991; // 60% tighter than previous 0.985 logic
@@ -59,6 +64,10 @@ export default function Watchlist() {
   );
   const [toast, setToast] = useState<{ msg: string; bg?: string } | null>(null);
   const [showAllTrades, setShowAllTrades] = useState(false);
+
+  // quantOverrides holds adaptive confidence scores computed by manual Quant run
+  const [quantOverrides, setQuantOverrides] = useState<Record<string, number>>({});
+  const [isRunningQuant, setIsRunningQuant] = useState(false);
 
   const searchDebounceRef = useRef<number | null>(null);
 
@@ -260,8 +269,8 @@ export default function Watchlist() {
   // ------------------------------
   // ALL REMAINING CODE UNMODIFIED
   // ------------------------------
-
-  // (Everything below here is 100% identical to your original file)
+  // (Everything below here preserves original logic; I only add quant UI + manual run)
+  // ------------------------------
 
   // ------------------------------
   // Save new trades to Supabase (for symbols that don't have trades yet)
@@ -377,8 +386,14 @@ export default function Watchlist() {
         previousClose: prevClose,
         history: {
           prices: t.prices ?? t.history?.prices ?? [prevClose, prevClose, live.price],
-          highs: t.highs ?? t.history?.highs ?? [prevClose * 1.01, prevClose * 1.005, live.price * 1.006],
-          lows: t.lows ?? t.history?.lows ?? [prevClose * 0.99, prevClose * 0.995, live.price * 0.994],
+          highs:
+            t.highs ??
+            t.history?.highs ??
+            [prevClose * 1.01, prevClose * 1.005, live.price * 1.006],
+          lows:
+            t.lows ??
+            t.history?.lows ??
+            [prevClose * 0.99, prevClose * 0.995, live.price * 0.994],
           volumes: t.volumes ?? t.history?.volumes ?? [100000, 150000, 200000],
         },
         // keep compatibility for callers expecting top-level props too
@@ -410,10 +425,13 @@ export default function Watchlist() {
         }
       }
 
+      // If quantOverrides has an adaptive confidence for this symbol, use it
+      const overriddenConfidence = quantOverrides[t.symbol];
+
       return {
         symbol: t.symbol,
         signal: t.direction === "long" ? "BUY" : t.direction === "short" ? "SELL" : "HOLD",
-        confidence: signalResult.confidence ?? 50,
+        confidence: typeof overriddenConfidence === "number" ? overriddenConfidence : signalResult.confidence ?? 50,
         explanation: t.explanation ?? signalResult.explanation ?? "",
         price: live.price,
         type: t.type ?? "stock",
@@ -424,7 +442,7 @@ export default function Watchlist() {
         hitStatus,
       };
     });
-  }, [savedTrades, livePrices, userEmail]);
+  }, [savedTrades, livePrices, userEmail, quantOverrides]);
 
   // ------------------------------
   // Score new symbols without trades
@@ -479,10 +497,12 @@ export default function Watchlist() {
         },
       });
 
+      const overriddenConfidence = quantOverrides[s.symbol];
+
       return {
         symbol: s.symbol,
         signal: result.signal,
-        confidence: result.confidence ?? 50,
+        confidence: typeof overriddenConfidence === "number" ? overriddenConfidence : result.confidence ?? 50,
         explanation: result.explanation ?? "",
         price: live.price ?? prevClose,
         type: s.type,
@@ -493,7 +513,7 @@ export default function Watchlist() {
         hitStatus: "ACTIVE",
       };
     });
-  }, [symbolsWithoutTrades, livePrices]);
+  }, [symbolsWithoutTrades, livePrices, quantOverrides]);
 
   // ------------------------------
   // Combine, sort & dedupe merged list
@@ -517,8 +537,6 @@ export default function Watchlist() {
   // Debounced searchTerm is used for filtering
   const filteredByCategory = useMemo(() => {
     const list = combinedSorted.filter((t) => (category === "all" ? true : t.type === category));
-
-    // when category !== 'all' user expects **all** items in that category (not just top 5)
     return list;
   }, [combinedSorted, category]);
 
@@ -590,6 +608,92 @@ export default function Watchlist() {
   }, [searchInput]);
 
   // ------------------------------
+  // QUANT AI: manual run function (only when user clicks 'Run Quant AI')
+  // - Computes adaptive confidence using RL weight
+  // - Fires browser notification + UI toast when confidence > threshold
+  // - DOES NOT modify DB savedTrades, only updates quantOverrides used for UI
+  // ------------------------------
+  const runQuantAIOnce = async () => {
+    setIsRunningQuant(true);
+    try {
+      const overrides: Record<string, number> = {};
+
+      // iterate through combined symbols list (uniqueSymbols)
+      const symbolsToScore = uniqueSymbols.map((s) => s.symbol);
+
+      for (const sym of symbolsToScore) {
+        const live = livePrices[sym] ?? { price: 0, previousClose: 0 };
+        const prevClose = live.previousClose ?? live.price ?? 0;
+
+        // Build safe history (prefer DB savedTrades when possible)
+        const dbRecord = savedTrades.find((t) => t.symbol === sym);
+        const history = {
+          prices:
+            dbRecord?.prices ??
+            dbRecord?.history?.prices ??
+            [prevClose * 0.985, prevClose * 0.992, prevClose, live.price],
+          highs:
+            dbRecord?.highs ??
+            dbRecord?.history?.highs ??
+            [prevClose * 1.01, prevClose * 1.005, live.price * 1.006],
+          lows:
+            dbRecord?.lows ??
+            dbRecord?.history?.lows ??
+            [prevClose * 0.99, prevClose * 0.995, live.price * 0.994],
+          volumes: dbRecord?.volumes ?? dbRecord?.history?.volumes ?? [100000, 150000, 220000],
+        };
+
+        // generate SMC signal (same signature used earlier)
+        const smc = generateSMCSignal({
+          symbol: sym,
+          current: live.price,
+          previousClose: prevClose,
+          ohlc: {
+            open: prevClose * 0.998,
+            high: live.price * 1.006,
+            low: live.price * 0.994,
+            close: live.price,
+          },
+          history,
+        });
+
+        // RL weight & adaptive confidence
+        const rlWeight = RL.getWeight(sym);
+        const adaptiveConfidence = applyAdaptiveConfidence(smc.confidence ?? 50, rlWeight);
+        overrides[sym] = adaptiveConfidence;
+
+        // Fire notifications for high-confidence signals
+        if (adaptiveConfidence >= ALERT_CONFIDENCE_THRESHOLD && typeof window !== "undefined") {
+          // UI Toast
+          setToast({
+            msg: `${smc.signal} signal (${Math.round(adaptiveConfidence)}%) on ${sym}`,
+            bg: adaptiveConfidence >= ALERT_CONFIDENCE_THRESHOLD ? "bg-green-600" : "bg-yellow-600",
+          });
+
+          // Browser Notification
+          if ("Notification" in window && Notification.permission !== "denied") {
+            Notification.requestPermission().then((perm) => {
+              if (perm === "granted") {
+                new Notification(`Quant Alert: ${sym}`, {
+                  body: `${smc.signal} | Confidence ${Math.round(adaptiveConfidence)}%`,
+                });
+              }
+            });
+          }
+        }
+      }
+
+      // commit overrides for UI
+      setQuantOverrides(overrides);
+    } catch (err) {
+      console.error("runQuantAIOnce failed", err);
+      setToast({ msg: "Quant AI run failed", bg: "bg-red-600" });
+    } finally {
+      setIsRunningQuant(false);
+    }
+  };
+
+  // ------------------------------
   // Render
   // ------------------------------
   return (
@@ -601,7 +705,7 @@ export default function Watchlist() {
         </Link>
       </div>
 
-      <div className="mb-4">
+      <div className="mb-4 flex gap-2 items-center">
         <input
           type="text"
           placeholder="Search symbol..."
@@ -609,6 +713,17 @@ export default function Watchlist() {
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
         />
+        <button
+          onClick={() => {
+            // manual run of Quant AI (Full Quant Mode) — user requested manual only
+            runQuantAIOnce();
+          }}
+          className="px-4 py-2 rounded bg-indigo-600 text-white"
+          disabled={isRunningQuant}
+          title="Run Full Quant AI (manual)"
+        >
+          {isRunningQuant ? "Running AI…" : "Run Quant AI"}
+        </button>
       </div>
 
       {toast && <div className={`p-3 text-white rounded mb-4 ${toast.bg}`}>{toast.msg}</div>}

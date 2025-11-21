@@ -10,6 +10,10 @@ import { supabase } from "../src/lib/supabaseClient";
 import saveTradeToSupabase, { saveTargetHitToSupabase } from "@/src/supabase/trades";
 import { getUserTrades, getTargetHitTrades } from "@/src/supabase/getUserTrades";
 
+// ------------------- IMPORT NEW QUANT AI MODULES -------------------
+import { RL } from "../src/quant/rlModel";
+import { applyAdaptiveConfidence } from "../src/quant/confidenceEngine";
+
 const homeSymbols = {
   stock: ["RELIANCE.NS", "TCS.NS", "INFY.NS"],
   index: ["^NSEI", "^NSEBANK"],
@@ -33,14 +37,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<StockDisplay[]>([]);
-  const [toast, setToast] = useState<{
-    msg: string;
-    bg?: string;
-    currentPrice?: number;
-    stoploss?: number;
-    targets?: number[];
-    timestamp?: number;
-  } | null>(null);
+  const [toast, setToast] = useState<any>(null);
 
   const [supabaseUser, setSupabaseUser] = useState<any>(null);
   const [savedTrades, setSavedTrades] = useState<any[]>([]);
@@ -48,7 +45,6 @@ export default function Home() {
 
   const lastSignalsRef = useRef<Record<string, string>>({});
   const router = useRouter();
-
   const userEmail = supabaseUser?.email ?? "";
 
   // ------------------- AUTH LISTENER -------------------
@@ -62,20 +58,18 @@ export default function Home() {
       }
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        if (session?.user) {
-          setSupabaseUser(session.user);
-          setSavedTrades(await getUserTrades(session.user.email!));
-          const hit = await getTargetHitTrades(session.user.email!);
-          if (hit.length > 0) setTargetHitTrade(hit[0]);
-        } else {
-          setSupabaseUser(null);
-          setSavedTrades([]);
-          setTargetHitTrade(null);
-        }
+    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        setSupabaseUser(session.user);
+        setSavedTrades(await getUserTrades(session.user.email!));
+        const hit = await getTargetHitTrades(session.user.email!);
+        if (hit.length > 0) setTargetHitTrade(hit[0]);
+      } else {
+        setSupabaseUser(null);
+        setSavedTrades([]);
+        setTargetHitTrade(null);
       }
-    );
+    });
 
     return () => listener.subscription.unsubscribe();
   }, []);
@@ -90,7 +84,7 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // ------------------- SYMBOL MAPPING -------------------
+  // ------------------- SYMBOL CONVERSION -------------------
   const apiSymbol = (symbol: string) => {
     if (symbol === "BTC/USD") return "BTC-USD";
     if (symbol === "ETH/USD") return "ETH-USD";
@@ -108,11 +102,8 @@ export default function Home() {
     ];
 
     try {
-      const response = await fetch(
-        `/api/prices?symbols=${allSymbols.map(apiSymbol).join(",")}`
-      );
+      const response = await fetch(`/api/prices?symbols=${allSymbols.map(apiSymbol).join(",")}`);
       const data = await response.json();
-
       const now = Date.now();
       const updated: any = {};
 
@@ -136,25 +127,7 @@ export default function Home() {
     return () => clearInterval(i);
   }, []);
 
-  // ------------------- TARGET-HIT CHECK -------------------
-  const alreadyRecordedTargetHit = (
-    symbol: string,
-    hitIndex: number,
-    hitPrice: number
-  ) => {
-    const norm = (s: string) => s?.replace?.(".NS", "");
-    const clean = norm(symbol);
-
-    for (const t of savedTrades) {
-      if (norm(t.symbol) === clean && t.status === "target_hit") {
-        if (t.hit_target_index === hitIndex) return true;
-        if (t.hit_price === hitPrice) return true;
-      }
-    }
-    return false;
-  };
-
-  // ------------------- SAVE + NOTIFY -------------------
+  // ------------------- SAVE + NOTIFY + RL LEARNING -------------------
   const maybeNotifyAndSave = async (
     symbol: string,
     provider: string,
@@ -162,6 +135,7 @@ export default function Home() {
     prevClose: number,
     currentPrice?: number
   ) => {
+    // Normalize signals
     const normalizedSignal =
       trade.signal === "BUY" || trade.signal === "SELL"
         ? trade.signal
@@ -172,10 +146,10 @@ export default function Home() {
         : "HOLD";
 
     if (lastSignalsRef.current[symbol] === normalizedSignal) return;
-
     lastSignalsRef.current[symbol] = normalizedSignal;
     localStorage.setItem("lastSignals", JSON.stringify(lastSignalsRef.current));
 
+    // Toast UI
     setToast({
       msg: `${normalizedSignal} signal on ${symbol}`,
       bg: normalizedSignal === "BUY" ? "bg-green-600" : "bg-red-600",
@@ -185,11 +159,11 @@ export default function Home() {
       timestamp: FIXED_SIGNAL_TIMESTAMP,
     });
 
-    if (supabaseUser && "Notification" in window) {
+    // Browser Notification
+    if (supabaseUser && "Notification" in window && Notification.permission !== "denied") {
+      Notification.requestPermission();
       if (Notification.permission === "granted") {
-        new Notification(`${normalizedSignal} signal - ${symbol}`);
-      } else if (Notification.permission !== "denied") {
-        Notification.requestPermission();
+        new Notification(`${normalizedSignal} Trade Signal: ${symbol}`);
       }
     }
 
@@ -199,13 +173,17 @@ export default function Home() {
 
     if (trade.targets && currentPrice >= Math.max(...trade.targets)) {
       status = "target_hit";
+      RL.update(symbol, "WIN"); // <-- Reinforcement learning
     } else if (trade.stoploss && currentPrice <= trade.stoploss) {
       status = "stop_loss";
+      RL.update(symbol, "LOSS");
     }
 
     if (status === "target_hit") {
+      // compute safe hitTargetIndex
       let hitIndex = 1;
-      if (Array.isArray(trade.targets)) {
+      if (Array.isArray(trade.targets) && trade.targets.length) {
+        // find the highest target that is <= currentPrice and get its 1-based index
         for (let i = trade.targets.length - 1; i >= 0; i--) {
           if (currentPrice >= trade.targets[i]) {
             hitIndex = i + 1;
@@ -214,16 +192,10 @@ export default function Home() {
         }
       }
 
-      if (alreadyRecordedTargetHit(symbol, hitIndex, currentPrice)) return;
-
-      const saved = await saveTargetHitToSupabase({
+      await saveTargetHitToSupabase({
         userEmail,
         symbol,
-        type: symbol.includes(".NS")
-          ? "stock"
-          : symbol.includes("/")
-          ? "crypto"
-          : "index",
+        type: symbol.includes(".NS") ? "stock" : symbol.includes("/") ? "crypto" : "index",
         direction: normalizedSignal === "BUY" ? "long" : "short",
         entryPrice: prevClose,
         stopLoss: trade.stoploss,
@@ -231,47 +203,30 @@ export default function Home() {
         confidence: trade.confidence ?? 0,
         status: "target_hit",
         provider,
-        note: trade.explanation ?? "",
         timestamp: FIXED_SIGNAL_TIMESTAMP,
         hitPrice: currentPrice,
         hitTargetIndex: hitIndex,
       });
 
-      if (saved) {
-        setSavedTrades((p) => [saved, ...p]);
-        setTargetHitTrade(saved);
-      }
       return;
     }
 
-    const saved = await saveTradeToSupabase({
+    await saveTradeToSupabase({
       userEmail,
       symbol,
-      type: symbol.includes(".NS")
-        ? "stock"
-        : symbol.includes("/")
-        ? "crypto"
-        : "index",
+      type: symbol.includes(".NS") ? "stock" : symbol.includes("/") ? "crypto" : "index",
       direction: normalizedSignal === "BUY" ? "long" : "short",
       entryPrice: prevClose,
-      stopLoss: trade.stoploss,
-      targets: trade.targets,
       confidence: trade.confidence ?? 0,
       status,
       provider,
-      note: trade.explanation ?? "",
       timestamp: FIXED_SIGNAL_TIMESTAMP,
     });
-
-    if (saved) {
-      setSavedTrades((p) => (p.find((x) => x.id === saved.id) ? p : [saved, ...p]));
-    }
   };
 
-  // ------------------- LOAD DATA -------------------
+  // ------------------- LOAD DATA (AI DECISION LOOP) -------------------
   const loadData = async () => {
     setLoading(true);
-
     const out: StockDisplay[] = [];
 
     for (const [type, symbols] of Object.entries(homeSymbols)) {
@@ -283,7 +238,6 @@ export default function Home() {
           const prev = lp?.previousClose ?? 0;
           const price = lp?.price ?? prev;
 
-          // ---- UPDATED CALL: Sends proper OHLC + history for full SMC + RSI + EMA + SMA ----
           const smc = generateSMCSignal({
             symbol,
             current: price,
@@ -295,43 +249,27 @@ export default function Home() {
               close: price,
             },
             history: {
-  prices: [
-    prev * 0.985,
-    prev * 0.992,
-    prev * 1.002,
-    prev * 0.998,
-    prev,
-    price,
-  ],
-  highs: [
-    prev * 1.01,
-    prev * 1.008,
-    prev * 1.005,
-    prev * 1.003,
-    prev * 1.002,
-    price * 1.006,
-  ],
-  lows: [
-    prev * 0.98,
-    prev * 0.985,
-    prev * 0.992,
-    prev * 0.995,
-    prev * 0.997,
-    price * 0.994,
-  ],
-  volumes: [100000, 150000, 220000, 300000, 390000, 450000],
-}
-
+              prices: [prev * 0.985, prev * 0.992, prev * 1.002, prev * 0.998, prev, price],
+              highs: [
+                prev * 1.01,
+                prev * 1.008,
+                prev * 1.005,
+                prev * 1.003,
+                prev * 1.002,
+                price * 1.006,
+              ],
+              lows: [prev * 0.98, prev * 0.985, prev * 0.992, prev * 0.995, prev * 0.997, price * 0.994],
+              volumes: [100000, 150000, 220000, 300000, 390000, 450000],
+            },
           });
 
-          // 60% reduced stoploss
-        const stoploss =
-          smc.signal === "BUY"
-            ? prev * (1 - (1 - 0.985) * 0.6) // → prev * 0.991
-            : smc.signal === "SELL"
-            ? prev * (1 + (0.015 * 0.6))     // → prev * 1.009
-            : prev;
+          // -------- Adaptive RL Confidence Applied --------
+          const rlWeight = RL.getWeight(symbol);
+          const adaptiveConfidence = applyAdaptiveConfidence(smc.confidence, rlWeight);
 
+          // -------- Stoploss + Targeting (unchanged original logic) --------
+          const stoploss =
+            smc.signal === "BUY" ? prev * 0.991 : smc.signal === "SELL" ? prev * 1.009 : prev;
 
           const targets =
             smc.signal === "BUY"
@@ -343,7 +281,7 @@ export default function Home() {
           const stock: StockDisplay = {
             symbol: symbol.replace(".NS", ""),
             signal: smc.signal,
-            confidence: smc.confidence,
+            confidence: adaptiveConfidence,
             explanation: smc.explanation,
             price,
             type: type as any,
@@ -352,142 +290,99 @@ export default function Home() {
             stoploss,
             targets,
             hitStatus:
-              price >= Math.max(...targets)
-                ? "TARGET ✅"
-                : price <= stoploss
-                ? "STOP ❌"
-                : "ACTIVE",
+              price >= Math.max(...targets) ? "TARGET ✅" : price <= stoploss ? "STOP ❌" : "ACTIVE",
           };
 
-          if (
-            savedTrades.find(
-              (t) =>
-                t.symbol.replace(".NS", "") === symbol.replace(".NS", "") &&
-                t.status === "target_hit"
-              )
-            ) {
-              stock.hitStatus = "TARGET ✅";
-            }
-  
-            if (!best || stock.confidence > best.confidence) best = stock;
-  
-            await maybeNotifyAndSave(
-              stock.symbol,
-              "yahoo",
-              { ...smc, stoploss, targets },
-              prev,
-              price
-            );
-          } catch {}
-        }
-  
-        if (best) out.push(best);
-      }
-  
-      if (targetHitTrade) {
-        out.push({
-          symbol: targetHitTrade.symbol,
-          signal: "BUY",
-          confidence: 100,
-          explanation: "Previously Hit Target Trade",
-          price:
-            targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
-          type: "stock",
-          support:
-            targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
-          resistance:
-            targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
-          stoploss:
-            targetHitTrade.stop_loss ?? targetHitTrade.stopLoss,
-          targets: targetHitTrade.targets,
-          hitStatus: "TARGET ✅",
-        });
-      }
-  
-      setStockData(out);
-      setLoading(false);
-    };
-  
-    // ------------------- FIXED DEPENDENCIES -------------------
-    useEffect(() => {
-      loadData();
-      const i = setInterval(loadData, 30000);
-      return () => clearInterval(i);
-    }, [
-      Object.keys(livePrices).length,
-      savedTrades.length,
-      targetHitTrade ? targetHitTrade.id : null,
-    ]);
-  
-    // ------------------- SEARCH -------------------
-    const handleSearch = () => {
-      if (!supabaseUser) {
-        setToast({ msg: "Pro membership required!", bg: "bg-red-600" });
-        return;
-      }
-  
-      const term = search.trim().toLowerCase();
-      if (!term) return setSearchResults(stockData);
-  
-      setSearchResults(stockData.filter((s) => s.symbol.toLowerCase().includes(term)));
-    };
-  
-    // ------------------- RENDER -------------------
-    return (
-      <div className="p-6 bg-gray-100 min-h-screen">
-        {/* FIXED TOAST */}
-        {toast && (
-          <NotificationToast
-            message={toast.msg}
-            bg={toast.bg}
-            currentPrice={toast.currentPrice}
-            stoploss={toast.stoploss}
-            targets={toast.targets}
-            timestamp={toast.timestamp}
-            onClose={() => setToast(null)}
-          />
-        )}
-  
-        <div className="mb-4">
-          <button
-            onClick={() => {
-              if (!supabaseUser) {
-                setToast({ msg: "Please login first!", bg: "bg-red-600" });
-                return;
-              }
-              router.push("/watchlist");
-            }}
-            className="bg-yellow-500 text-white px-4 py-2 rounded"
-          >
-            Pro Members Watchlist
-          </button>
+          if (!best || stock.confidence > best.confidence) best = stock;
 
-          *Educational Research Work 
-        </div>
-  
-        <div className="flex gap-2 mb-4">
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            disabled={!supabaseUser}
-            placeholder="Search (Pro only)"
-            className="flex-1 p-2 rounded border"
-          />
-          <button
-            onClick={handleSearch}
-            className="px-4 py-2 rounded text-white bg-blue-500"
-          >
-            Search
-          </button>
-        </div>
-  
-        {loading ? (
-          <div>Loading…</div>
-        ) : (
-          (searchResults.length ? searchResults : stockData).map((s) => (
-            <StockCard key={s.symbol} {...s} />
-          ))
-        )}
+          // Send signal + learn outcome
+          await maybeNotifyAndSave(symbol, "quant-ai", stock, prev, price);
+        } catch {}
+      }
+
+      if (best) out.push(best);
+    }
+
+    // -------- Display last trade that hit target --------
+    if (targetHitTrade) {
+      out.push({
+        symbol: targetHitTrade.symbol,
+        signal: "BUY",
+        confidence: 100,
+        explanation: "Target hit previously",
+        price: targetHitTrade.entryPrice ?? 0,
+        type: "stock",
+        support: targetHitTrade.entryPrice ?? 0,
+        resistance: targetHitTrade.entryPrice ?? 0,
+        stoploss: targetHitTrade.stopLoss ?? 0,
+        targets: targetHitTrade.targets ?? [],
+        hitStatus: "TARGET ✅",
+      });
+    }
+
+    setStockData(out);
+    setLoading(false);
+  };
+
+  // ------------------- RUN AI LOOP CONTINUOUSLY -------------------
+  useEffect(() => {
+    loadData();
+    const i = setInterval(loadData, 30000);
+    return () => clearInterval(i);
+  }, [Object.keys(livePrices).length]);
+
+  // ------------------- SEARCH -------------------
+  const handleSearch = () => {
+    if (!supabaseUser) {
+      setToast({ msg: "Pro membership required!", bg: "bg-red-600" });
+      return;
+    }
+
+    const term = search.trim().toLowerCase();
+    if (!term) return setSearchResults(stockData);
+
+    setSearchResults(stockData.filter((s) => s.symbol.toLowerCase().includes(term)));
+  };
+
+  // ------------------- UI -------------------
+  return (
+    <div className="p-6 bg-gray-100 min-h-screen">
+      {/* Toast */}
+      {toast && <NotificationToast {...toast} onClose={() => setToast(null)} />}
+
+      <div className="mb-4">
+        <button
+          onClick={() => {
+            if (!supabaseUser) {
+              setToast({ msg: "Please login first!", bg: "bg-red-600" });
+              return;
+            }
+            router.push("/watchlist");
+          }}
+          className="bg-yellow-500 text-white px-4 py-2 rounded"
+        >
+          Pro Watchlist
+        </button>
       </div>
-    );
-  }
+
+      <div className="flex gap-2 mb-4">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          disabled={!supabaseUser}
+          placeholder="Search (Pro only)"
+          className="flex-1 p-2 rounded border"
+        />
+        <button onClick={handleSearch} className="px-4 py-2 rounded text-white bg-blue-500">
+          Search
+        </button>
+      </div>
+
+      {loading ? (
+        <div>Loading…</div>
+      ) : (
+        (searchResults.length ? searchResults : stockData).map((s) => <StockCard key={s.symbol} {...s} />)
+      )}
+    </div>
+  );
+}

@@ -13,52 +13,81 @@ export interface StockData {
   lows: number[];
   volumes: number[];
   lastUpdated: number;
-  source?: "finnhub" | "yahoo" | "unknown";
+  source?: "finnhub" | "yahoo" | "cache" | "unknown";
 }
 
-// Fetch + fallback + timeout
-export async function fetchStockData(symbol: string): Promise<StockData> {
+// --- Helper: Safe fetch with timeout ---
+async function safeFetch(url: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000); // 20s hard timeout
+
   try {
-    // Timeout using Axios CancelToken
-    const source = axios.CancelToken.source();
-    const timeout = setTimeout(() => {
-      source.cancel(`Request timed out for ${symbol}`);
-    }, 15000); // 15 seconds
-
-    const url = `/api/stock?symbol=${encodeURIComponent(symbol)}`;
-    const res = await axios.get(url, { cancelToken: source.token });
+    const res = await fetch(url, { signal: controller.signal });
+    return await res.json();
+  } catch (err) {
+    console.warn("❌ safeFetch failed:", url, err);
+    return null;
+  } finally {
     clearTimeout(timeout);
+  }
+}
 
-    const data = res.data as StockData;
+// --- Delay function (30s fallback retry waiting) ---
+function delay(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-    // Use previousClose as fallback if current price is missing
-    const price = data.current ?? data.previousClose ?? 0;
+// --- Main unified fetch function ---
+export async function fetchStockData(symbol: string): Promise<StockData> {
+  let response = null;
 
-    return {
-      ...data,
-      current: price,
-      lastUpdated: Date.now(),
-    };
-  } catch (err: any) {
-    if (axios.isCancel(err)) {
-      console.warn("fetchStockData timeout:", symbol, err.message);
-    } else {
-      console.warn("fetchStockData failed:", symbol, err);
+  try {
+    // ---------- 1️⃣ Try main /api route (Yahoo first) ----------
+    response = await safeFetch(`/api/stock?symbol=${symbol}`);
+    if (response && response.current !== undefined) {
+      return {
+        ...response,
+        lastUpdated: Date.now(),
+        source: "yahoo",
+      };
     }
 
-    return {
-      symbol,
-      current: 0,
-      high: null,
-      low: null,
-      open: null,
-      previousClose: null,
-      prices: [],
-      highs: [],
-      lows: [],
-      volumes: [],
-      lastUpdated: Date.now(),
-      source: "unknown",
-    };
+    console.warn(`⚠ Yahoo data failed for ${symbol}, retrying...`);
+
+    // ---------- 2️⃣ Delay before fallback ----------
+    await delay(30000); // <-- 30 second pause before trying Finnhub
+
+    // ---------- 3️⃣ Try Finnhub fallback ----------
+    const finnhubURL = `/api/finnhub?symbol=${symbol}`;
+    const finnhubData = await safeFetch(finnhubURL);
+
+    if (finnhubData && finnhubData.current !== undefined) {
+      return {
+        ...finnhubData,
+        lastUpdated: Date.now(),
+        source: "finnhub",
+      };
+    }
+
+    console.warn(`❌ Finnhub also failed for ${symbol}`);
+
+  } catch (err) {
+    console.error("fetchStockData error", err);
   }
+
+  // ---------- 4️⃣ Final fallback (fail-safe) ----------
+  return {
+    symbol,
+    current: 0,
+    high: null,
+    low: null,
+    open: null,
+    previousClose: null,
+    prices: [],
+    highs: [],
+    lows: [],
+    volumes: [],
+    lastUpdated: Date.now(),
+    source: "unknown",
+  };
 }
