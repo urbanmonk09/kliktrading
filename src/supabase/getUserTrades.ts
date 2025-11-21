@@ -27,9 +27,9 @@ export interface Notification {
   created_at?: string;
 }
 
-// ---------------------------------------------
+// -------------------------------------------------
 // Fetch ALL trades for a user
-// ---------------------------------------------
+// -------------------------------------------------
 export async function getUserTrades(email: string): Promise<TradeRecord[]> {
   const { data, error } = await supabase
     .from("trades")
@@ -45,10 +45,12 @@ export async function getUserTrades(email: string): Promise<TradeRecord[]> {
   return data ?? [];
 }
 
-// ---------------------------------------------
+// -------------------------------------------------
 // Fetch last 2 trades where target hit
-// ---------------------------------------------
-export async function getTargetHitTrades(userEmail: string): Promise<TradeRecord[]> {
+// -------------------------------------------------
+export async function getTargetHitTrades(
+  userEmail: string
+): Promise<TradeRecord[]> {
   const { data, error } = await supabase
     .from("trades")
     .select("*")
@@ -65,9 +67,9 @@ export async function getTargetHitTrades(userEmail: string): Promise<TradeRecord
   return data ?? [];
 }
 
-// ---------------------------------------------
+// -------------------------------------------------
 // Save Notification
-// ---------------------------------------------
+// -------------------------------------------------
 export async function saveNotification(
   user_email: string,
   symbol: string,
@@ -92,24 +94,59 @@ export async function saveNotification(
   }
 }
 
-// ---------------------------------------------
-// Save Trade
-// ---------------------------------------------
+// -------------------------------------------------
+// Save Trade (WITH TYPE-SAFE CLEANING 🎯)
+// -------------------------------------------------
+// -------------------------------------------------
+// Save Trade (WITH DETAILED ERROR LOGGING)
+// -------------------------------------------------
 export async function saveTradeToSupabase(
   trade: Partial<TradeRecord>
 ): Promise<TradeRecord | null> {
   try {
-    const { data, error } = await supabase
-      .from("trades")
-      .insert([trade])
-      .select();
+    // Get current user email (required for RLS)
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
 
-    if (error) {
-      console.error("🔴 Supabase Error (saveTradeToSupabase):", error);
+    if (userError || !user?.email) {
+      console.error("🔴 Auth Error: Cannot get logged-in user email", userError);
       return null;
     }
 
-    return data?.[0] ?? null;
+    // Inject user_email (required for insert)
+    const tradeWithEmail = {
+      ...trade,
+      user_email: trade.user_email ?? user.email,
+    };
+
+    // Prevent undefined values
+    const cleanedTrade = Object.fromEntries(
+      Object.entries(tradeWithEmail).filter(([_, v]) => v !== undefined)
+    );
+
+    console.log("🟡 Saving trade:", cleanedTrade);
+
+    const { data, error } = await supabase
+      .from("trades")
+      .insert([cleanedTrade]) // 👈 MUST be array
+      .select();
+
+    if (error) {
+      console.error(
+        "🔴 Supabase Error (saveTradeToSupabase):",
+        JSON.stringify(error, null, 2)
+      );
+      return null;
+    }
+
+    if (!data) {
+      console.error("🔴 No data returned by Supabase (possible RLS issue)");
+      return null;
+    }
+
+    return data[0] ?? null;
   } catch (err) {
     console.error("🔥 Unexpected Error (saveTradeToSupabase):", err);
     return null;

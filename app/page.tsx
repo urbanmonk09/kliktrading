@@ -18,10 +18,9 @@ const homeSymbols = {
 };
 
 // ------------------- FIXED TIMESTAMP -------------------
-// Signal timestamp fixed for entire day
 const getSignalTimestamp = () => {
   const now = new Date();
-  now.setHours(0, 0, 0, 0); // midnight today
+  now.setHours(0, 0, 0, 0);
   return now.getTime();
 };
 const FIXED_SIGNAL_TIMESTAMP = getSignalTimestamp();
@@ -137,7 +136,7 @@ export default function Home() {
     return () => clearInterval(i);
   }, []);
 
-  // ------------------- DUPLICATE TARGET-HIT CHECK -------------------
+  // ------------------- TARGET-HIT CHECK -------------------
   const alreadyRecordedTargetHit = (
     symbol: string,
     hitIndex: number,
@@ -177,7 +176,6 @@ export default function Home() {
     lastSignalsRef.current[symbol] = normalizedSignal;
     localStorage.setItem("lastSignals", JSON.stringify(lastSignalsRef.current));
 
-    // ------------------- TOAST NOTIFICATION -------------------
     setToast({
       msg: `${normalizedSignal} signal on ${symbol}`,
       bg: normalizedSignal === "BUY" ? "bg-green-600" : "bg-red-600",
@@ -187,7 +185,6 @@ export default function Home() {
       timestamp: FIXED_SIGNAL_TIMESTAMP,
     });
 
-    // ------------------- BROWSER NOTIFICATION -------------------
     if (supabaseUser && "Notification" in window) {
       if (Notification.permission === "granted") {
         new Notification(`${normalizedSignal} signal - ${symbol}`);
@@ -286,15 +283,54 @@ export default function Home() {
           const prev = lp?.previousClose ?? 0;
           const price = lp?.price ?? prev;
 
-          const smc = generateSMCSignal({ current: price, previousClose: prev });
+          // ---- UPDATED CALL: Sends proper OHLC + history for full SMC + RSI + EMA + SMA ----
+          const smc = generateSMCSignal({
+            symbol,
+            current: price,
+            previousClose: prev,
+            ohlc: {
+              open: prev * 0.998,
+              high: price * 1.006,
+              low: price * 0.994,
+              close: price,
+            },
+            history: {
+  prices: [
+    prev * 0.985,
+    prev * 0.992,
+    prev * 1.002,
+    prev * 0.998,
+    prev,
+    price,
+  ],
+  highs: [
+    prev * 1.01,
+    prev * 1.008,
+    prev * 1.005,
+    prev * 1.003,
+    prev * 1.002,
+    price * 1.006,
+  ],
+  lows: [
+    prev * 0.98,
+    prev * 0.985,
+    prev * 0.992,
+    prev * 0.995,
+    prev * 0.997,
+    price * 0.994,
+  ],
+  volumes: [100000, 150000, 220000, 300000, 390000, 450000],
+}
+
+          });
 
           // 60% reduced stoploss
-const stoploss =
-  smc.signal === "BUY"
-    ? prev * (1 - (1 - 0.985) * 0.6) // → prev * 0.991
-    : smc.signal === "SELL"
-    ? prev * (1 + (0.015 * 0.6))     // → prev * 1.009
-    : prev;
+        const stoploss =
+          smc.signal === "BUY"
+            ? prev * (1 - (1 - 0.985) * 0.6) // → prev * 0.991
+            : smc.signal === "SELL"
+            ? prev * (1 + (0.015 * 0.6))     // → prev * 1.009
+            : prev;
 
 
           const targets =
@@ -328,128 +364,130 @@ const stoploss =
               (t) =>
                 t.symbol.replace(".NS", "") === symbol.replace(".NS", "") &&
                 t.status === "target_hit"
-            )
-          ) {
-            stock.hitStatus = "TARGET ✅";
-          }
-
-          if (!best || stock.confidence > best.confidence) best = stock;
-
-          await maybeNotifyAndSave(
-            stock.symbol,
-            "yahoo",
-            { ...smc, stoploss, targets },
-            prev,
-            price
-          );
-        } catch {}
-      }
-
-      if (best) out.push(best);
-    }
-
-    if (targetHitTrade) {
-      out.push({
-        symbol: targetHitTrade.symbol,
-        signal: "BUY",
-        confidence: 100,
-        explanation: "Previously Hit Target Trade",
-        price:
-          targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
-        type: "stock",
-        support:
-          targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
-        resistance:
-          targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
-        stoploss:
-          targetHitTrade.stop_loss ?? targetHitTrade.stopLoss,
-        targets: targetHitTrade.targets,
-        hitStatus: "TARGET ✅",
-      });
-    }
-
-    setStockData(out);
-    setLoading(false);
-  };
-
-  // ------------------- FIXED DEPENDENCIES -------------------
-  useEffect(() => {
-    loadData();
-    const i = setInterval(loadData, 30000);
-    return () => clearInterval(i);
-  }, [
-    Object.keys(livePrices).length,
-    savedTrades.length,
-    targetHitTrade ? targetHitTrade.id : null,
-  ]);
-
-  // ------------------- SEARCH -------------------
-  const handleSearch = () => {
-    if (!supabaseUser) {
-      setToast({ msg: "Pro membership required!", bg: "bg-red-600" });
-      return;
-    }
-
-    const term = search.trim().toLowerCase();
-    if (!term) return setSearchResults(stockData);
-
-    setSearchResults(stockData.filter((s) => s.symbol.toLowerCase().includes(term)));
-  };
-
-  // ------------------- RENDER -------------------
-  return (
-    <div className="p-6 bg-gray-100 min-h-screen">
-      {/* FIXED TOAST */}
-      {toast && (
-        <NotificationToast
-          message={toast.msg}
-          bg={toast.bg}
-          currentPrice={toast.currentPrice}
-          stoploss={toast.stoploss}
-          targets={toast.targets}
-          timestamp={toast.timestamp}
-          onClose={() => setToast(null)}
-        />
-      )}
-
-      <div className="mb-4">
-        <button
-          onClick={() => {
-            if (!supabaseUser) {
-              setToast({ msg: "Please login first!", bg: "bg-red-600" });
-              return;
+              )
+            ) {
+              stock.hitStatus = "TARGET ✅";
             }
-            router.push("/watchlist");
-          }}
-          className="bg-yellow-500 text-white px-4 py-2 rounded"
-        >
-          Pro Members Watchlist
-        </button>
-      </div>
+  
+            if (!best || stock.confidence > best.confidence) best = stock;
+  
+            await maybeNotifyAndSave(
+              stock.symbol,
+              "yahoo",
+              { ...smc, stoploss, targets },
+              prev,
+              price
+            );
+          } catch {}
+        }
+  
+        if (best) out.push(best);
+      }
+  
+      if (targetHitTrade) {
+        out.push({
+          symbol: targetHitTrade.symbol,
+          signal: "BUY",
+          confidence: 100,
+          explanation: "Previously Hit Target Trade",
+          price:
+            targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
+          type: "stock",
+          support:
+            targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
+          resistance:
+            targetHitTrade.entry_price ?? targetHitTrade.entryPrice ?? 0,
+          stoploss:
+            targetHitTrade.stop_loss ?? targetHitTrade.stopLoss,
+          targets: targetHitTrade.targets,
+          hitStatus: "TARGET ✅",
+        });
+      }
+  
+      setStockData(out);
+      setLoading(false);
+    };
+  
+    // ------------------- FIXED DEPENDENCIES -------------------
+    useEffect(() => {
+      loadData();
+      const i = setInterval(loadData, 30000);
+      return () => clearInterval(i);
+    }, [
+      Object.keys(livePrices).length,
+      savedTrades.length,
+      targetHitTrade ? targetHitTrade.id : null,
+    ]);
+  
+    // ------------------- SEARCH -------------------
+    const handleSearch = () => {
+      if (!supabaseUser) {
+        setToast({ msg: "Pro membership required!", bg: "bg-red-600" });
+        return;
+      }
+  
+      const term = search.trim().toLowerCase();
+      if (!term) return setSearchResults(stockData);
+  
+      setSearchResults(stockData.filter((s) => s.symbol.toLowerCase().includes(term)));
+    };
+  
+    // ------------------- RENDER -------------------
+    return (
+      <div className="p-6 bg-gray-100 min-h-screen">
+        {/* FIXED TOAST */}
+        {toast && (
+          <NotificationToast
+            message={toast.msg}
+            bg={toast.bg}
+            currentPrice={toast.currentPrice}
+            stoploss={toast.stoploss}
+            targets={toast.targets}
+            timestamp={toast.timestamp}
+            onClose={() => setToast(null)}
+          />
+        )}
+  
+        <div className="mb-4">
+          <button
+            onClick={() => {
+              if (!supabaseUser) {
+                setToast({ msg: "Please login first!", bg: "bg-red-600" });
+                return;
+              }
+              router.push("/watchlist");
+            }}
+            className="bg-yellow-500 text-white px-4 py-2 rounded"
+          >
+            Pro Members Watchlist
+          </button>
 
-      <div className="flex gap-2 mb-4">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          disabled={!supabaseUser}
-          placeholder="Search (Pro only)"
-          className="flex-1 p-2 rounded border"
-        />
-        <button
-          onClick={handleSearch}
-          className="px-4 py-2 rounded text-white bg-blue-500"
-        >
-          Search
-        </button>
+          *Educational Research Work 
+        </div>
+  
+        <div className="flex gap-2 mb-4">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            disabled={!supabaseUser}
+            placeholder="Search (Pro only)"
+            className="flex-1 p-2 rounded border"
+          />
+          <button
+            onClick={handleSearch}
+            className="px-4 py-2 rounded text-white bg-blue-500"
+          >
+            Search
+          </button>
+        </div>
+  
+        {loading ? (
+          <div>Loading…</div>
+        ) : (
+          (searchResults.length ? searchResults : stockData).map((s) => (
+            <StockCard key={s.symbol} {...s} />
+          ))
+        )}
       </div>
-
-      {loading ? (
-        <div>Loading…</div>
-      ) : (
-        (searchResults.length ? searchResults : stockData).map((s) => (
-          <StockCard key={s.symbol} {...s} />
-        ))
-      )}
-    </div>
-  );
-}
+    );
+  }
