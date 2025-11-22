@@ -1,5 +1,4 @@
 // src/supabase/markTargetHit.ts
-
 import { saveTargetHitToSupabase } from "./trades";
 
 interface MarkHitOptions {
@@ -27,7 +26,7 @@ export async function markTargetHit(opts: MarkHitOptions) {
       type: opts.type,
       direction: opts.direction,
       entryPrice: opts.entryPrice,
-      stopLoss: opts.stopLoss ?? null,
+      stopLoss: opts.stopLoss ?? undefined, // ✅ fixed
       targets: opts.targets ?? [],
       confidence: opts.confidence,
       provider: opts.provider,
