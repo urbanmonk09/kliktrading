@@ -13,8 +13,8 @@ import { generateSMCSignal, StockDisplay } from "@/src/utils/xaiLogic";
 import { symbols as allSymbols } from "../src/api/symbols";
 
 const FIXED_SIGNAL_TIMESTAMP = new Date().setHours(0, 0, 0, 0);
-const CLIENT_CACHE_DURATION = 30 * 1000;
-const CHUNK_SIZE = 10;
+const CLIENT_CACHE_DURATION = 30 * 1000; // 30s
+const CHUNK_SIZE = 10; // API chunk size
 let clientCache: Record<string, any> = {};
 let lastClientFetch = 0;
 
@@ -33,7 +33,7 @@ export default function Home() {
   const router = useRouter();
   const userEmail = supabaseUser?.email ?? "";
 
-  // ---------- Supabase user ----------
+  // ---------- Supabase user handling ----------
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data }) => {
       if (data?.user) {
@@ -67,51 +67,58 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // ---------- Robust live price fetch ----------
-  const fetchLivePrices = async () => {
+  const apiSymbol = (symbol: string) => {
+    if (symbol === "BTCUSDT") return "BINANCE:BTCUSDT";
+    if (symbol === "ETHUSDT") return "BINANCE:ETHUSDT";
+    if (symbol === "XAUUSD") return "OANDA:XAUUSD";
+    return symbol;
+  };
+
+  // ---------- Robust fetch with chunking + retries + fallback ----------
+  const fetchLivePrices = async (symbols: string[]): Promise<Record<string, any>> => {
     const now = Date.now();
-    if (now - lastClientFetch < CLIENT_CACHE_DURATION && Object.keys(clientCache).length) {
+    if (now - lastClientFetch < CLIENT_CACHE_DURATION) {
       setLivePrices(clientCache);
       return clientCache;
     }
 
-    const result: Record<string, any> = {};
-    try {
-      for (let i = 0; i < allSymbols.length; i += CHUNK_SIZE) {
-        const chunk = allSymbols.slice(i, i + CHUNK_SIZE).map((s) => s.symbol);
-        let attempts = 0;
-        let success = false;
+    const fetchedData: Record<string, any> = {};
 
-        while (!success && attempts < 3) {
-          attempts++;
-          try {
-            const res = await fetch("/api/finnhub", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ symbols: chunk }),
-            });
-            if (!res.ok) throw new Error("Failed to fetch chunk");
-            const data = await res.json();
-            Object.assign(result, data);
-            success = true;
-          } catch (err) {
-            if (attempts >= 3) throw err;
-            await new Promise((r) => setTimeout(r, 1000 * attempts)); // exponential backoff
-          }
+    const fetchChunk = async (chunk: string[], retries = 3) => {
+      for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+          const res = await fetch("/api/finnhub", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ symbols: chunk }),
+          });
+          if (!res.ok) throw new Error("Failed to fetch chunk");
+          const data = await res.json();
+          return data;
+        } catch (err) {
+          if (attempt === retries - 1) throw err;
+          await new Promise((r) => setTimeout(r, 1000));
         }
       }
+    };
 
-      clientCache = result;
-      lastClientFetch = Date.now();
-      setLivePrices(result);
-      return result;
-    } catch (err) {
-      console.error("Failed to fetch live prices:", err);
-      clientCache = {};
-      lastClientFetch = 0;
-      setToast({ msg: "Failed to fetch live prices", bg: "bg-red-500" });
-      return {};
+    for (let i = 0; i < symbols.length; i += CHUNK_SIZE) {
+      const chunk = symbols.slice(i, i + CHUNK_SIZE).map(apiSymbol);
+      try {
+        const data = await fetchChunk(chunk);
+        Object.assign(fetchedData, data);
+      } catch (err) {
+        console.error("Failed to fetch chunk after retries:", err);
+        chunk.forEach((s) => {
+          fetchedData[s] = { c: null, pc: null, o: null, h: null, l: null };
+        });
+      }
     }
+
+    clientCache = fetchedData;
+    lastClientFetch = now;
+    setLivePrices(fetchedData);
+    return fetchedData;
   };
 
   // ---------- Notification & Supabase save ----------
@@ -122,7 +129,9 @@ export default function Home() {
     prevClose: number,
     currentPrice?: number
   ) => {
-    const normalizedSignal = trade.signal === "BUY" || trade.signal === "SELL" ? trade.signal : "HOLD";
+    const normalizedSignal =
+      trade.signal === "BUY" || trade.signal === "SELL" ? trade.signal : "HOLD";
+
     if (lastSignalsRef.current[symbol] === normalizedSignal) return;
     lastSignalsRef.current[symbol] = normalizedSignal;
     localStorage.setItem("lastSignals", JSON.stringify(lastSignalsRef.current));
@@ -155,9 +164,12 @@ export default function Home() {
       RL.update(symbol, "LOSS");
     }
 
+    const supabaseType: "stock" | "index" | "crypto" =
+      symbol.includes(".NS") || symbol.includes("XAU") ? "stock" : symbol.includes("/") ? "crypto" : "index";
+
     if (status === "target_hit") {
       let hitIndex = 1;
-      if (Array.isArray(trade.targets)) {
+      if (Array.isArray(trade.targets) && trade.targets.length) {
         for (let i = trade.targets.length - 1; i >= 0; i--) {
           if (currentPrice >= trade.targets[i]) {
             hitIndex = i + 1;
@@ -165,9 +177,6 @@ export default function Home() {
           }
         }
       }
-
-      const supabaseType: "stock" | "index" | "crypto" =
-        trade.type === "commodity" ? "stock" : trade.type;
 
       await saveTargetHitToSupabase({
         userEmail: supabaseUser.email,
@@ -191,7 +200,7 @@ export default function Home() {
     await saveTradeToSupabase({
       userEmail: supabaseUser.email,
       symbol,
-      type: trade.type === "commodity" ? "stock" : trade.type,
+      type: supabaseType,
       direction: normalizedSignal === "BUY" ? "long" : "short",
       entryPrice: prevClose,
       confidence: trade.confidence ?? 0,
@@ -205,13 +214,13 @@ export default function Home() {
   const loadData = async () => {
     setLoading(true);
     const out: StockDisplay[] = [];
-    const liveData = await fetchLivePrices();
+    const liveData = await fetchLivePrices(allSymbols.map((s) => s.symbol));
 
     const bestByType: Record<string, StockDisplay | null> = {};
 
     for (const s of allSymbols) {
       try {
-        const lp = liveData[s.symbol] || {};
+        const lp = liveData[apiSymbol(s.symbol)] || {};
         const price = lp.c ?? lp.pc ?? 0;
         const prev = lp.pc ?? price;
 
@@ -248,12 +257,7 @@ export default function Home() {
           resistance: prev * 1.01,
           stoploss,
           targets,
-          hitStatus:
-            price >= Math.max(...targets)
-              ? "TARGET ✅"
-              : price <= stoploss
-              ? "STOP ❌"
-              : "ACTIVE",
+          hitStatus: price >= Math.max(...targets) ? "TARGET ✅" : price <= stoploss ? "STOP ❌" : "ACTIVE",
         };
 
         if (!bestByType[s.type] || stock.confidence > bestByType[s.type]!.confidence) {
