@@ -1,7 +1,8 @@
 // src/pages/api/predict.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { generateSMCSignal } from "@/src/utils/xaiLogic";
-import { policyFromContext } from "@/src/utils/rlAgent";
+import { policyFromContext, RLContext } from "@/src/utils/rlAgent";
+import { fetchStockData } from "@/src/api/fetchStockData";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -22,22 +23,29 @@ async function savePredictionToSupabase(payload: any) {
   }
 }
 
+// Helper to ensure trendBias matches RLContext literal type
+function parseTrendBias(explanation?: string): "BULLISH" | "BEARISH" | "NEUTRAL" {
+  if (!explanation) return "NEUTRAL";
+  if (explanation.includes("BULLISH")) return "BULLISH";
+  if (explanation.includes("BEARISH")) return "BEARISH";
+  return "NEUTRAL";
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const { symbol, userEmail } = req.body;
     if (!symbol) return res.status(400).json({ error: "symbol required" });
 
-    // fetch candles using your existing fetchStockData (normalize to arrays)
-    const { fetchStockData } = await import("@/src/api/fetchStockData");
-    const data = await fetchStockData(symbol); // should return { prices:[], highs:[], lows:[], volumes:[], current, previousClose }
-    const prices = data.prices ?? [];
-    const highs = data.highs ?? [];
-    const lows = data.lows ?? [];
-    const volumes = data.volumes ?? [];
-    const current = data.current ?? data.previousClose ?? 0;
-    const prevClose = data.previousClose ?? current;
+    // Fetch candles & stock data
+    const stockData = await fetchStockData(symbol);
+    const prices = stockData.prices ?? [];
+    const highs = stockData.highs ?? [];
+    const lows = stockData.lows ?? [];
+    const volumes = stockData.volumes ?? [];
+    const current = stockData.current ?? stockData.previousClose ?? 0;
+    const prevClose = stockData.previousClose ?? current;
 
-    // get baseline SMC + indicators
+    // Get baseline SMC + indicators
     const baseline = generateSMCSignal({
       symbol,
       current,
@@ -48,30 +56,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       volumes,
     });
 
-    // Build context for RL policy (must align with rlAgent.stateFromContext)
-    const context = {
-  rsi: (baseline.explanation && /RSI:([0-9]+)/.exec(baseline.explanation)?.[1])
-    ? Number(/RSI:([0-9]+)/.exec(baseline.explanation)![1])
-    : 50,
+    // Build RLContext
+    const context: RLContext = {
+      rsi: (baseline.explanation && /RSI:([0-9]+)/.exec(baseline.explanation)?.[1])
+        ? Number(/RSI:([0-9]+)/.exec(baseline.explanation)![1])
+        : stockData.rsi ?? 50,
 
-  ema50: 0,
-  ema200: 0,
-  trendBias: baseline.explanation?.includes("BULLISH")
-    ? "BULLISH"
-    : baseline.explanation?.includes("BEARISH")
-    ? "BEARISH"
-    : "NEUTRAL",
+      ema50: stockData.ema50 ?? 0,
+      ema200: stockData.ema200 ?? 0,
+      sma20: stockData.sma20 ?? 0,
+      trendBias: parseTrendBias(baseline.explanation),
+      smcConfidence: baseline.confidence ?? 50,
+      signal: "HOLD", // default, RL will override
+    };
 
-  smcConfidence: baseline.confidence ?? 50,
-  sma20: 0,
-
-  /** REQUIRED FIELD FIX */
-  signal: "HOLD", // default before RL decides
-} as const;
-
-
+    // Run RL policy
     const rl = await policyFromContext(context);
 
+    // Prepare prediction payload
     const prediction = {
       user_email: userEmail ?? null,
       symbol,
@@ -81,11 +83,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       context: { baseline, context, rlState: rl.state, qvals: rl.qvals },
     };
 
-    // store in supabase predictions
+    // Store prediction in Supabase
     await savePredictionToSupabase(prediction);
 
-    // return result to client, include an id? We don't have insert return here; client can search latest if needed.
+    // Return response to client
     return res.status(200).json({ ...prediction, explanation: baseline.explanation });
+
   } catch (err: any) {
     console.error("predict error", err);
     return res.status(500).json({ error: err.message || "predict failed" });
