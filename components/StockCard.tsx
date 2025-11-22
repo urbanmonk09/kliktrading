@@ -1,192 +1,150 @@
+// src/components/StockCard.tsx
 "use client";
 
-import React from "react";
-import { StockDisplay } from "../src/utils/xaiLogic"; // ✅ correct type import
+import React, { useEffect, useState } from "react";
 
-interface StockCardProps extends Omit<StockDisplay, "signal" | "explanation"> {
-  signal: "BUY" | "SELL" | "HOLD" | "LONG" | "SHORT";
-  hitStatus?: "TARGET ✅" | "STOP ❌" | "ACTIVE";
-  explanation?: string; // ✅ made optional (fixes type error)
+export interface StockCardProps {
+  symbol: string;
+  signal: "BUY" | "SELL" | "HOLD";
+  confidence: number;
+  explanation: string;
+  price?: number;
+  type: "stock" | "index" | "crypto" | "commodity";
+  stoploss?: number;
+  targets?: number[];
+  support?: number;
+  resistance?: number;
+  hitStatus?: "ACTIVE" | "TARGET ✅" | "STOP ❌";
 }
 
 export default function StockCard({
   symbol,
   signal,
-  confidence = 0,
+  confidence,
   explanation,
   price,
   type,
+  stoploss = 0,
+  targets = [],
   support,
   resistance,
-  stoploss,
-  targets,
-  hitStatus = "ACTIVE",
+  hitStatus,
 }: StockCardProps) {
-  const formatPrice = (p?: number | null) =>
-    p !== undefined && p !== null && !isNaN(p) ? p.toFixed(2) : "--";
+  const adjustedConfidence =
+    signal === "HOLD"
+      ? 50
+      : confidence < 70
+      ? 70
+      : confidence > 100
+      ? 100
+      : confidence;
 
-  const formatConfidence = (c: number) =>
-    !isNaN(c) ? `${c.toFixed(2)}%` : "--";
+  const [animatedValue, setAnimatedValue] = useState(adjustedConfidence);
 
-  // Map signal to display text for UI
-  const displaySignal: "LONG" | "SHORT" | "HOLD" =
-    signal === "BUY" || signal === "LONG"
-      ? "LONG"
-      : signal === "SELL" || signal === "SHORT"
-      ? "SHORT"
-      : "HOLD";
+  useEffect(() => {
+    let rafId: number;
+    const animate = () => {
+      setAnimatedValue((prev) => {
+        if (Math.abs(prev - adjustedConfidence) < 0.5) return adjustedConfidence;
+        return prev + (adjustedConfidence - prev) * 0.1;
+      });
+      rafId = requestAnimationFrame(animate);
+    };
+    animate();
+    return () => cancelAnimationFrame(rafId);
+  }, [adjustedConfidence]);
 
-  // Compute hit comments based on price
-  const hitComments: string[] = [];
-  if (price !== undefined && stoploss !== undefined) {
-    if (
-      (displaySignal === "LONG" && price <= stoploss) ||
-      (displaySignal === "SHORT" && price >= stoploss)
-    ) {
-      hitComments.push("STOP ❌");
-    }
-  }
-  if (price !== undefined && targets?.length) {
-    targets.forEach((t) => {
-      if (
-        (displaySignal === "LONG" && price >= t) ||
-        (displaySignal === "SHORT" && price <= t)
-      ) {
-        hitComments.push(`TARGET ✅`);
-      }
-    });
-  }
-  const hitCommentText = hitComments.join(", ");
+  const color =
+    signal === "BUY"
+      ? "#16a34a"
+      : signal === "SELL"
+      ? "#ef4444"
+      : "#9ca3af";
 
-  // Confidence gauge circle
-  const radius = 30;
-  const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset =
-    circumference * (1 - Math.min(Math.max(confidence, 0), 100) / 100);
-
-  // Border color based on signal
-  const borderColor =
-    displaySignal === "LONG"
-      ? "border-green-500"
-      : displaySignal === "SHORT"
-      ? "border-red-500"
-      : "border-blue-500";
+  const normalizedValue = Math.min(Math.max(animatedValue, 0), 100);
+  const dashArray = `${normalizedValue}, 100`;
 
   return (
-    <div
-      className={`bg-white shadow-md rounded-lg p-4 mb-4 border-l-4 ${borderColor} hover:shadow-xl transition`}
-    >
-      {/* Header */}
-      <div className="flex justify-between items-center mb-2">
-        <h2 className="text-xl font-bold">{symbol}</h2>
-        <span
-          className={`px-2 py-1 rounded text-white font-semibold ${
-            displaySignal === "LONG"
-              ? "bg-green-500"
-              : displaySignal === "SHORT"
-              ? "bg-red-500"
-              : "bg-gray-500"
-          }`}
-        >
-          {displaySignal}
-        </span>
-      </div>
-
-      {/* Price & Status */}
-      <p className="text-gray-700">
-        <span className="font-semibold">Price:</span> {formatPrice(price)}
-      </p>
-      <p className="text-gray-700">
-        <span className="font-semibold">Status:</span> {hitStatus}
-      </p>
-
-      {/* Support / Resistance */}
-      <div className="flex gap-4 text-gray-600 text-sm my-1">
-        <p>
-          <span className="font-semibold">Support:</span> {formatPrice(support)}
-        </p>
-        <p>
-          <span className="font-semibold">Resistance:</span>{" "}
-          {formatPrice(resistance)}
-        </p>
-      </div>
-
-      {/* Stoploss */}
-      {stoploss !== undefined && (
-        <p className="text-red-600 text-sm">
-          <span className="font-semibold">Stoploss:</span>{" "}
-          {formatPrice(stoploss)}
-        </p>
-      )}
-
-      {/* Targets */}
-      {targets?.length ? (
-        <div className="text-green-600 text-sm my-1">
-          <span className="font-semibold">Targets:</span>{" "}
-          {targets.map((t, i) => (
-            <span key={i} className="mr-2">
-              {formatPrice(t)}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      {/* Confidence Gauge */}
-      <div className="flex items-center gap-2 mt-2">
-        <svg width="70" height="70" viewBox="0 0 70 70">
+    <div className="bg-white p-4 rounded-lg shadow flex items-center gap-4">
+      {/* Left: Confidence Donut */}
+      <div className="w-16 h-16 relative flex-shrink-0">
+        <svg viewBox="0 0 36 36" className="w-full h-full">
           <circle
-            cx="35"
-            cy="35"
-            r={radius}
+            cx="18"
+            cy="18"
+            r="15.9155"
+            fill="none"
             stroke="#e5e7eb"
-            strokeWidth="8"
-            fill="none"
+            strokeWidth="4"
           />
           <circle
-            cx="35"
-            cy="35"
-            r={radius}
-            stroke={
-              confidence >= 70
-                ? "#22c55e"
-                : confidence >= 40
-                ? "#eab308"
-                : "#ef4444"
-            }
-            strokeWidth="8"
+            cx="18"
+            cy="18"
+            r="15.9155"
             fill="none"
-            strokeDasharray={circumference}
-            strokeDashoffset={strokeDashoffset}
+            stroke={color}
+            strokeWidth="4"
+            strokeDasharray={dashArray}
             strokeLinecap="round"
-            transform="rotate(-90 35 35)"
+            transform="rotate(-90 18 18)"
           />
-          <text
-            x="50%"
-            y="50%"
-            dominantBaseline="middle"
-            textAnchor="middle"
-            fontSize="12"
-            fill="#111827"
-          >
-            {formatConfidence(confidence)}
-          </text>
         </svg>
-        <span className="font-semibold text-gray-700">Confidence</span>
+        <div className="absolute inset-0 flex items-center justify-center text-xs font-bold">
+          {Math.round(animatedValue)}%
+        </div>
       </div>
 
-      {/* Hit Comments */}
-      {hitCommentText && (
-        <p className="text-blue-600 text-sm mt-1 font-semibold">
-          {hitCommentText}
-        </p>
-      )}
+      {/* Right: Info */}
+      <div className="flex-1 flex flex-col gap-1">
+        <div className="flex justify-between items-center">
+          <h2 className="font-bold text-lg">{symbol}</h2>
+          <span
+            className={`px-2 py-1 rounded font-semibold text-white ${
+              signal === "BUY"
+                ? "bg-green-600"
+                : signal === "SELL"
+                ? "bg-red-600"
+                : "bg-gray-400"
+            }`}
+          >
+            {signal}
+          </span>
+        </div>
 
-      {/* Explanation */}
-      {explanation && (
-        <p className="text-gray-600 text-xs mt-1">
-          <span className="font-semibold">Note:</span> {explanation}
+        <p className="text-sm">
+          Price: <span className="font-medium">{price ?? "-"}</span>
         </p>
-      )}
+        <p className="text-sm">
+          Stoploss: <span className="font-medium">{stoploss ?? "-"}</span>
+        </p>
+        {targets.length > 0 && (
+          <p className="text-sm">
+            Targets: {targets.map((t) => t.toFixed(2)).join(", ")}
+          </p>
+        )}
+        {support !== undefined && (
+          <p className="text-sm">Support: {support.toFixed(2)}</p>
+        )}
+        {resistance !== undefined && (
+          <p className="text-sm">Resistance: {resistance.toFixed(2)}</p>
+        )}
+        {hitStatus && (
+          <p
+            className={`text-sm font-semibold ${
+              hitStatus === "TARGET ✅"
+                ? "text-green-600"
+                : hitStatus === "STOP ❌"
+                ? "text-red-600"
+                : "text-gray-600"
+            }`}
+          >
+            {hitStatus}
+          </p>
+        )}
+        {explanation && (
+          <p className="text-xs text-gray-500 mt-1">{explanation}</p>
+        )}
+      </div>
     </div>
   );
 }
