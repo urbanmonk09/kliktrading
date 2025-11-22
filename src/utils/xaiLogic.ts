@@ -3,6 +3,36 @@
 // Clean, typed, and null-safe. Logic intended to replace your current xaiLogic implementation
 // while preserving existing return shapes and not changing external behavior other than improved confidence.
 
+export interface WatchlistDisplay {
+  symbol: string;
+
+  // Price Data
+  current: number;
+  open: number;
+  high: number;
+  low: number;
+  previousClose: number;
+
+  // Historical Arrays (optional)
+  prices?: number[];
+  highs?: number[];
+  lows?: number[];
+  volumes?: number[];
+
+  // Signal + Strategy Output
+  signal: "BUY" | "SELL" | "HOLD";
+  stoploss?: number;
+  targets: number[];
+
+  // AI Confidence
+  confidence?: number;
+  explanation?: string;
+
+  // Meta
+  lastUpdated: number;
+}
+
+
 export interface StockData {
   symbol: string;
   current: number;

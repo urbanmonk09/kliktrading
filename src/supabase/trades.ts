@@ -10,19 +10,24 @@ import { supabase } from "@/src/lib/supabaseClient";
 export interface TradePayload {
   userEmail: string;
   symbol: string;
-  type: "stock" | "crypto" | "index";
+  type: "stock" | "index" | "crypto" | "commodity";
   direction: "long" | "short";
   entryPrice: number;
-  stopLoss?: number | null;
-  targets?: number[] | null;
   confidence: number;
   status: "active" | "target_hit" | "stop_loss";
   provider: string;
-  note?: string;
   timestamp: number;
+  stopLoss?: number;
+  targets?: number[];
+  hitPrice?: number;
+  hitTargetIndex?: number;
+  note?: string; // <-- add this
+}
 
-  hitPrice?: number | null;
-  hitTargetIndex?: number | null;
+export interface TargetHitPayload extends TradePayload {
+  hitPrice: number;
+  hitTargetIndex: number;
+  note?: string; // optional note
 }
 
 export interface TargetHitPayload extends TradePayload {
