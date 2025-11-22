@@ -50,13 +50,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // Build context for RL policy (must align with rlAgent.stateFromContext)
     const context = {
-      rsi: (baseline.explanation && /RSI:([0-9]+)/.exec(baseline.explanation)?.[1]) ? Number(/RSI:([0-9]+)/.exec(baseline.explanation)![1]) : 50,
-      ema50: 0,
-      ema200: 0,
-      trendBias: baseline.explanation?.includes("BULLISH") ? "BULLISH" : baseline.explanation?.includes("BEARISH") ? "BEARISH" : "NEUTRAL",
-      smcConfidence: baseline.confidence ?? 50,
-      sma20: 0,
-    };
+  rsi: (baseline.explanation && /RSI:([0-9]+)/.exec(baseline.explanation)?.[1])
+    ? Number(/RSI:([0-9]+)/.exec(baseline.explanation)![1])
+    : 50,
+
+  ema50: 0,
+  ema200: 0,
+  trendBias: baseline.explanation?.includes("BULLISH")
+    ? "BULLISH"
+    : baseline.explanation?.includes("BEARISH")
+    ? "BEARISH"
+    : "NEUTRAL",
+
+  smcConfidence: baseline.confidence ?? 50,
+  sma20: 0,
+
+  /** REQUIRED FIELD FIX */
+  signal: "HOLD", // default before RL decides
+} as const;
+
 
     const rl = await policyFromContext(context);
 
