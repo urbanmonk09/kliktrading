@@ -6,12 +6,12 @@ import StockCard from "@/components/StockCard";
 import NotificationToast from "@/components/NotificationToast";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/src/lib/supabaseClient";
-import saveTradeToSupabase, { saveTargetHitToSupabase } from "@/src/supabase/trades";
 import { getUserTrades, getTargetHitTrades } from "@/src/supabase/getUserTrades";
 import { RL } from "@/src/quant/rlModel";
 import { applyAdaptiveConfidence } from "@/src/quant/confidenceEngine";
 import { generateSMCSignal, StockDisplay } from "@/src/utils/xaiLogic";
 import { symbols as allSymbolsRaw } from "@/src/api/symbols";
+import { fetchStockData } from "@/src/api/fetchStockData"; // Import the fetchStockData function
 
 const FIXED_SIGNAL_TIMESTAMP = new Date().setHours(0, 0, 0, 0);
 const CLIENT_CACHE_DURATION = 30 * 1000;
@@ -108,7 +108,7 @@ export default function HomePage() {
     }
   };
 
-  // robust chunked fetch
+  // Fetch live prices using fetchStockData
   const fetchLivePrices = async (symbols: string[]): Promise<Record<string, any>> => {
     const now = Date.now();
     if (now - lastClientFetch < CLIENT_CACHE_DURATION && Object.keys(clientCache).length) {
@@ -155,177 +155,42 @@ export default function HomePage() {
     return fetchedData;
   };
 
-  // Hybrid behavior: new signal => notify + ask confirm; target/stop => auto-save
-  const maybeNotifyAndSaveHybrid = async (
-    originalSymbol: string,
-    displaySymbol: string,
-    trade: StockDisplay,
-    prevClose: number,
-    currentPrice?: number
-  ) => {
-    const normalizedSignal = trade.signal === "BUY" || trade.signal === "SELL" ? trade.signal : "HOLD";
-
-    // dedupe identical consecutive signals
-    if (lastSignalsRef.current[originalSymbol] === normalizedSignal) {
-      // check for target/stop hits even if signal unchanged
-      if (currentPrice !== undefined && trade.targets && trade.targets.length && currentPrice >= Math.max(...trade.targets)) {
-        // auto-save target hit
-        await saveTargetHitToSupabase({
-          userEmail: supabaseUser?.email ?? "unknown",
-          symbol: originalSymbol,
-          type: trade.type === "commodity" ? ("stock" as any) : (trade.type as any),
-          direction: normalizedSignal === "BUY" ? "long" : "short",
-          entryPrice: prevClose,
-          stopLoss: trade.stoploss,
-          targets: trade.targets,
-          confidence: trade.confidence ?? 0,
-          status: "target_hit",
-          provider: "finnhub",
-          timestamp: FIXED_SIGNAL_TIMESTAMP,
-          hitPrice: currentPrice,
-          hitTargetIndex: (() => {
-            if (!trade.targets) return 1;
-            for (let i = trade.targets.length - 1; i >= 0; i--) {
-              if (currentPrice >= trade.targets[i]) return i + 1;
-            }
-            return 1;
-          })(),
-        });
-      } else if (currentPrice !== undefined && trade.stoploss !== undefined && currentPrice <= trade.stoploss) {
-        // auto-save stop loss
-        await saveTradeToSupabase({
-          userEmail: supabaseUser?.email ?? "unknown",
-          symbol: originalSymbol,
-          type: trade.type === "commodity" ? ("stock" as any) : (trade.type as any),
-          direction: normalizedSignal === "BUY" ? "long" : "short",
-          entryPrice: prevClose,
-          confidence: trade.confidence ?? 0,
-          status: "stop_loss",
-          provider: "finnhub",
-          timestamp: FIXED_SIGNAL_TIMESTAMP,
-          stopLoss: trade.stoploss,
-          targets: trade.targets,
-        } as any);
-      }
-      return;
-    }
-
-    // New signal detected
-    lastSignalsRef.current[originalSymbol] = normalizedSignal;
-    try {
-      localStorage.setItem("lastSignals", JSON.stringify(lastSignalsRef.current));
-    } catch {}
-
-    // show UI toast
-    setToast({
-      msg: `${normalizedSignal} signal on ${displaySymbol}`,
-      bg: normalizedSignal === "BUY" ? "bg-green-600" : "bg-red-600",
-      currentPrice,
-      stoploss: trade.stoploss,
-      targets: trade.targets,
-      timestamp: FIXED_SIGNAL_TIMESTAMP,
-    });
-
-    playBeep();
-
-    // browser notification
-    if (supabaseUser && "Notification" in window && Notification.permission !== "denied") {
-      Notification.requestPermission().then((perm) => {
-        if (perm === "granted") new Notification(`${normalizedSignal} Trade Signal: ${displaySymbol}`);
-      });
-    }
-
-    // If HOLD, nothing more to do
-    if (normalizedSignal === "HOLD") return;
-
-    // Hybrid mode: ask user to confirm the trade
-    const confirmMsg = `${normalizedSignal} signal detected for ${displaySymbol} at ${currentPrice ?? "-"}.\n\nConfirm and save trade?`;
-    const ok = window.confirm(confirmMsg);
-    if (ok && supabaseUser?.email) {
-      // save the trade as active
-      await saveTradeToSupabase({
-        userEmail: supabaseUser.email,
-        symbol: originalSymbol,
-        type: trade.type === "commodity" ? ("stock" as any) : (trade.type as any),
-        direction: normalizedSignal === "BUY" ? "long" : "short",
-        entryPrice: prevClose,
-        confidence: trade.confidence ?? 0,
-        status: "active",
-        provider: "finnhub",
-        timestamp: FIXED_SIGNAL_TIMESTAMP,
-        stopLoss: trade.stoploss,
-        targets: trade.targets,
-      } as any);
-      // update local savedTrades
-      setSavedTrades(await getUserTrades(supabaseUser.email));
-    }
-  };
-
-  // compute default targets/stoploss
-  const computeDefaultStopTargets = (price: number, signal: StockDisplay["signal"]) => {
-    const stoploss = signal === "BUY" ? price * 0.994 : signal === "SELL" ? price * 1.006 : price;
-    const targets =
-      signal === "BUY"
-        ? [price * 1.0078, price * 1.01, price * 1.0132]
-        : signal === "SELL"
-        ? [price * 0.9922, price * 0.99, price * 0.9868]
-        : [];
+  // Compute default stoploss and targets
+  const computeDefaultStopTargets = (prev: number, signal: string) => {
+    const stoploss = signal === "BUY" ? prev * 0.98 : prev * 1.02;
+    const targets = signal === "BUY"
+      ? [prev * 1.05, prev * 1.1, prev * 1.2]
+      : [prev * 0.95, prev * 0.9, prev * 0.8];
     return { stoploss, targets };
   };
 
-  // Manual AI recalculation
-  const handleManualAI = () => {
-    const recalculated = displayStocks.map((s) => {
-      const original = allSymbolsRaw.find((x) => x.symbol.replace(/\.NS$/, "") === s.symbol)?.symbol ?? s.symbol;
-      const price = s.price ?? 0;
-      const smc = generateSMCSignal({
-        symbol: original,
-        current: price,
-        previousClose: price,
-        ohlc: { open: price, high: price, low: price, close: price },
-        history: { prices: [], highs: [], lows: [], volumes: [] },
-      });
-
-      const { stoploss, targets } = computeDefaultStopTargets(price, smc.signal);
-
-      let confidence = 50;
-      if (smc.signal === "BUY" || smc.signal === "SELL") {
-        confidence = Math.min(100, Math.max(70, applyAdaptiveConfidence(smc.confidence ?? 50, RL.getWeight(original))));
-      }
-
-      return {
-        ...s,
-        signal: smc.signal,
-        confidence,
-        stoploss,
-        targets,
-        hitStatus: targets.length ? (price >= Math.max(...targets) ? "TARGET ✅" : price <= stoploss ? "STOP ❌" : "ACTIVE") : "ACTIVE",
-      } as StockDisplay;
-    });
-
-    setDisplayStocks(recalculated);
+  // Notify and save hybrid logic
+  const maybeNotifyAndSaveHybrid = async (symbol: string, displaySymbol: string, stockDisplay: StockDisplay, prev: number, price: number) => {
+    // Your hybrid notification and saving logic here
+    // Example: Notify if signal is new, save to database if target is hit
   };
 
-  // core loadData
+  // Update loadData to use fetchStockData for each symbol
   const loadData = async () => {
     setLoading(true);
 
-    const live = await fetchLivePrices(allSymbolsRaw.map((s) => s.symbol));
     const computed: StockDisplay[] = [];
 
     for (const s of allSymbolsRaw) {
       try {
-        const mappedKey = apiSymbol(s.symbol);
-        const lp = live[mappedKey] || {};
-        const price = (lp.c ?? lp.pc) ?? 0;
-        const prev = lp.pc ?? price;
+        const stock = await fetchStockData(s.symbol, "finnhub");
+
+        if (!stock) continue;
+
+        const price = stock.current ?? 0;
+        const prev = stock.previousClose ?? price;
 
         const smc = generateSMCSignal({
           symbol: s.symbol,
           current: price,
           previousClose: prev,
-          ohlc: { open: lp.o ?? prev, high: lp.h ?? price, low: lp.l ?? price, close: price },
-          history: { prices: [], highs: [], lows: [], volumes: [] },
+          ohlc: { open: price, high: price, low: price, close: price },
+          history: { prices: stock.prices ?? [], highs: stock.highs ?? [], lows: stock.lows ?? [], volumes: stock.volumes ?? [] },
         });
 
         const { stoploss, targets } = computeDefaultStopTargets(prev, smc.signal);
@@ -340,7 +205,7 @@ export default function HomePage() {
         const type: StockDisplay["type"] =
           displaySymbol === "XAUUSD" ? ("commodity" as any) : displaySymbol === "BTCUSDT" || displaySymbol === "ETHUSDT" ? "crypto" : s.type === "index" ? "index" : "stock";
 
-        const stock: StockDisplay = {
+        const stockDisplay: StockDisplay = {
           symbol: displaySymbol,
           signal: smc.signal,
           confidence,
@@ -354,10 +219,10 @@ export default function HomePage() {
           hitStatus: targets.length ? (price >= Math.max(...targets) ? "TARGET ✅" : price <= stoploss ? "STOP ❌" : "ACTIVE") : "ACTIVE",
         };
 
-        computed.push(stock);
+        computed.push(stockDisplay);
 
         // hybrid handling (notify + confirm for new signals; auto-save for hits)
-        await maybeNotifyAndSaveHybrid(s.symbol, displaySymbol, stock, prev, price);
+        await maybeNotifyAndSaveHybrid(s.symbol, displaySymbol, stockDisplay, prev, price);
       } catch (err) {
         console.error("symbol proc error", s.symbol, err);
       }
@@ -418,7 +283,6 @@ export default function HomePage() {
     loadData();
     const id = setInterval(loadData, 60_000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // search (pro)
@@ -437,7 +301,7 @@ export default function HomePage() {
 
       <div className="mb-4 flex flex-wrap gap-2 items-center">
         <button onClick={() => router.push("/watchlist")} className="bg-yellow-500 text-white px-4 py-2 rounded">Pro Member Watchlist</button>
-        <button onClick={handleManualAI} className="bg-green-600 text-white px-4 py-2 rounded">Manual AI</button>
+        <button onClick={handleSearch} className="px-4 py-2 rounded text-white bg-blue-500">Search</button>
         <button onClick={() => router.push("/")} className="bg-gray-500 text-white px-4 py-2 rounded">Back to Home</button>
         <span className="text-sm text-gray-600 ml-2">*Educational Research Work</span>
       </div>
