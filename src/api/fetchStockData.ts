@@ -1,6 +1,7 @@
 export type Provider = "yahoo" | "finnhub";
 
 export interface StockData {
+  symbol: string;  // This is required, so we must include it in all return values
   current: number;
   previousClose: number;
   prices?: number[];
@@ -10,10 +11,12 @@ export interface StockData {
   error?: string;
 }
 
+// Fetch API key from environment variables
 const FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY || "";
 
 // Helper function to handle error cases
-const handleFetchError = (error: string): StockData => ({
+const handleFetchError = (error: string, symbol: string): StockData => ({
+  symbol, // Ensure symbol is always included
   current: 0,
   previousClose: 0,
   prices: [],
@@ -26,7 +29,7 @@ const handleFetchError = (error: string): StockData => ({
 // Function to handle the Finnhub API fetch
 async function fetchFinnhub(symbol: string): Promise<StockData> {
   if (!FINNHUB_API_KEY) {
-    return handleFetchError("Finnhub API key missing");
+    return handleFetchError("Finnhub API key missing", symbol);  // Pass the symbol here
   }
 
   try {
@@ -35,16 +38,18 @@ async function fetchFinnhub(symbol: string): Promise<StockData> {
     const data = await res.json();
 
     return {
+      symbol, // Include symbol in the result
       current: typeof data.c === "number" ? data.c : 0,
       previousClose: typeof data.pc === "number" ? data.pc : data.c ?? 0,
       prices: [],
       highs: [data.h ?? 0],
       lows: [data.l ?? 0],
       volumes: [],
+      error: "",
     };
   } catch (err) {
     console.error("Finnhub fetch error:", err);
-    return handleFetchError("Fetch failed");
+    return handleFetchError("Fetch failed", symbol);  // Pass the symbol here
   }
 }
 
@@ -75,25 +80,26 @@ async function fetchYahoo(symbol: string): Promise<StockData> {
     const json: Record<string, any> = await res.json();
     const data = json[yahooSymbol];
 
-    if (!data) return { current: 0, previousClose: 0, prices: [], highs: [], lows: [], volumes: [], error: "No data" };
+    if (!data) return { symbol, current: 0, previousClose: 0, prices: [], highs: [], lows: [], volumes: [], error: "No data" };
 
     // Use previousClose if current is zero or null
     const current = data.current && data.current !== 0 ? data.current : data.previousClose ?? 0;
 
     return {
+      symbol, // Include symbol in the result
       current,
       previousClose: data.previousClose ?? 0,
       prices: data.prices ?? [],
       highs: data.highs ?? [],
       lows: data.lows ?? [],
       volumes: data.volumes ?? [],
+      error: "",
     };
   } catch (err) {
     console.error("Yahoo fetch error:", err);
-    return { current: 0, previousClose: 0, prices: [], highs: [], lows: [], volumes: [], error: "Fetch failed" };
+    return { symbol, current: 0, previousClose: 0, prices: [], highs: [], lows: [], volumes: [], error: "Fetch failed" };
   }
 }
-
 
 // Main function to fetch stock data from either Finnhub or Yahoo
 export async function fetchStockData(symbol: string, provider: Provider): Promise<StockData> {
