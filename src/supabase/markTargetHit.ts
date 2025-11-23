@@ -1,45 +1,44 @@
 // src/supabase/markTargetHit.ts
-import { saveTargetHitToSupabase } from "./trades";
+import { saveTargetHit, TargetHitPayload } from "./trades";
 
-interface MarkHitOptions {
+export interface MarkHitOptions {
   userEmail: string;
   symbol: string;
-  type: "stock" | "crypto" | "index";
+  type: "stock" | "crypto" | "index" | "commodity";
   direction: "long" | "short";
   entryPrice: number;
-  stopLoss?: number | null;
+  stopLoss?: number; // ✅ make undefined instead of null
   targets: number[];
   confidence: number;
   provider: string;
   note?: string;
 
-  // NEW target hit info
+  // Target hit info
   hitPrice: number;
   hitTargetIndex: number; // 1, 2, 3...
 }
 
 export async function markTargetHit(opts: MarkHitOptions) {
   try {
-    const payload = {
+    const payload: TargetHitPayload = {
       userEmail: opts.userEmail,
       symbol: opts.symbol,
       type: opts.type,
       direction: opts.direction,
       entryPrice: opts.entryPrice,
-      stopLoss: opts.stopLoss ?? undefined, // ✅ fixed
-      targets: opts.targets ?? [],
+      stopLoss: opts.stopLoss, // ✅ undefined is allowed
+      targets: opts.targets,
       confidence: opts.confidence,
       provider: opts.provider,
       note: opts.note ?? "",
       timestamp: Date.now(),
 
-      // Important hit-specific fields
       hitPrice: opts.hitPrice,
       hitTargetIndex: opts.hitTargetIndex,
-      status: "target_hit" as const,
+      status: "target_hit", // ✅ force correct type
     };
 
-    const saved = await saveTargetHitToSupabase(payload);
+    const saved = await saveTargetHit(payload);
     return saved;
   } catch (err) {
     console.error("🔥 markTargetHit() failed:", err);

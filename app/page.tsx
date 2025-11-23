@@ -19,8 +19,6 @@ export default function HomePage() {
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<StockDisplay[]>([]);
   const [supabaseUser, setSupabaseUser] = useState<any>(null);
-  const [targetHitTrade, setTargetHitTrade] = useState<any | null>(null);
-
   const [toast, setToast] = useState<{
     message: string;
     bg: string;
@@ -31,100 +29,44 @@ export default function HomePage() {
   } | null>(null);
 
   const mountedRef = useRef(true);
-
   useEffect(() => {
     mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
+    return () => { mountedRef.current = false; };
   }, []);
 
-  // Supabase auth + saved trades
+  // ---------------------- Supabase auth + saved trades ----------------------
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getUser();
-      if (data?.user) {
-        setSupabaseUser(data.user);
-        const hits = await getTargetHitTrades(data.user.email!);
-        setTargetHitTrade(hits.length > 0 ? hits[0] : null);
-      }
+      if (data?.user) setSupabaseUser(data.user);
     })();
 
-    const { data: listener } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        setSupabaseUser(session.user);
-        const hits = await getTargetHitTrades(session.user.email!);
-        setTargetHitTrade(hits.length > 0 ? hits[0] : null);
-      } else {
-        setSupabaseUser(null);
-        setTargetHitTrade(null);
-      }
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) setSupabaseUser(session.user);
+      else setSupabaseUser(null);
     });
 
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Compute stoploss and targets
-const computeDefaultStopTargets = (prev: number, signal: string) => {
-  // Default values (for HOLD or unknown signal)
-  let stoploss = prev;
-  let targets = [prev];
+  // ---------------------- Default stoploss & targets ----------------------
+  const computeDefaultStopTargets = (prev: number, signal: string) => {
+    const SL = 0.006, T1 = 0.0078, T2 = 0.01, T3 = 0.0132;
+    if (signal === "BUY") return { stoploss: prev * (1 - SL), targets: [prev*(1+T1), prev*(1+T2), prev*(1+T3)] };
+    if (signal === "SELL") return { stoploss: prev * (1 + SL), targets: [prev*(1-T1), prev*(1-T2), prev*(1-T3)] };
+    return { stoploss: prev, targets: [prev] };
+  };
 
-  // Percent values
-  const SL_PERCENT = 0.006;   // 0.6%
-  const T1_PERCENT = 0.0078;  // 0.78%
-  const T2_PERCENT = 0.01;    // 1.00%
-  const T3_PERCENT = 0.0132;  // 1.32%
-
-  switch (signal) {
-    case "BUY":
-      stoploss = prev * (1 - SL_PERCENT);
-      targets = [
-        prev * (1 + T1_PERCENT),
-        prev * (1 + T2_PERCENT),
-        prev * (1 + T3_PERCENT),
-      ];
-      break;
-
-    case "SELL":
-      stoploss = prev * (1 + SL_PERCENT);
-      targets = [
-        prev * (1 - T1_PERCENT),
-        prev * (1 - T2_PERCENT),
-        prev * (1 - T3_PERCENT),
-      ];
-      break;
-
-    // HOLD or unsupported signal → defaults stay as previous
-    default:
-      stoploss = prev;
-      targets = [prev];
-      break;
-  }
-
-  return { stoploss, targets };
-};
-
-
-  // Load homepage stocks
+  // ---------------------- Load homepage stocks (parallel) ----------------------
   const loadData = async () => {
     setLoading(true);
-    const computed: StockDisplay[] = [];
-
-    let firstStockShown = false;
-    let firstIndexShown = false;
-    let firstCryptoShown = false;
-    let firstGoldShown = false;
-
-    for (const s of allSymbolsRaw) {
-      try {
+    try {
+      const promises = allSymbolsRaw.map(async (s) => {
         const provider: Provider = s.type === "stock" || s.type === "index" || s.type === "commodity" ? "yahoo" : "finnhub";
         const stock: StockData = await fetchStockData(s.symbol, provider);
-        if (!stock || stock.error) continue;
-
+        if (!stock || stock.error) return null;
         const price = stock.current || stock.previousClose || 0;
         const prev = stock.previousClose || price;
-
         const smc = generateSMCSignal({
           symbol: s.symbol,
           current: price,
@@ -132,22 +74,17 @@ const computeDefaultStopTargets = (prev: number, signal: string) => {
           ohlc: { open: price, high: price, low: price, close: price },
           history: { prices: stock.prices ?? [], highs: stock.highs ?? [], lows: stock.lows ?? [], volumes: stock.volumes ?? [] },
         });
-
         const { stoploss, targets } = computeDefaultStopTargets(prev, smc.signal);
-
-        const confidence = (smc.signal === "BUY" || smc.signal === "SELL")
+        const confidence = smc.signal === "BUY" || smc.signal === "SELL"
           ? Math.min(100, Math.max(70, applyAdaptiveConfidence(smc.confidence ?? 50, RL.getWeight(s.symbol))))
           : 50;
-
-        const displaySymbol = s.symbol.replace(/\.NS(\.NS)?$/, ""); // remove duplicate .NS
-
         const type: StockDisplay["type"] =
-          displaySymbol === "XAUUSD" ? "commodity" :
-          displaySymbol.includes("BTC") || displaySymbol.includes("ETH") ? "crypto" :
+          s.symbol.includes("XAU") ? "commodity" :
+          s.symbol.includes("BTC") || s.symbol.includes("ETH") ? "crypto" :
           s.type === "index" ? "index" : "stock";
 
-        const stockDisplay: StockDisplay = {
-          symbol: displaySymbol,
+        return {
+          symbol: s.symbol.replace(/\.NS$/, ""),
           signal: smc.signal,
           confidence,
           explanation: smc.explanation ?? "",
@@ -158,45 +95,33 @@ const computeDefaultStopTargets = (prev: number, signal: string) => {
           stoploss,
           targets,
           hitStatus: targets.length ? (price >= Math.max(...targets) ? "TARGET ✅" : price <= stoploss ? "STOP ❌" : "ACTIVE") : "ACTIVE",
-        };
+        } as StockDisplay;
+      });
 
-        // Show toast for signals
-        if (smc.signal === "BUY" || smc.signal === "SELL") {
-          setToast({
-            message: `Signal: ${smc.signal} (${displaySymbol})`,
-            currentPrice: price,
-            stoploss,
-            targets,
-            timestamp: Date.now(),
-            bg: smc.signal === "BUY" ? "bg-green-600" : "bg-red-600",
-          });
+      const results = (await Promise.all(promises)).filter(Boolean) as StockDisplay[];
+
+      // Pick one per type
+      const stockCard: StockDisplay[] = [];
+      const typesAdded = new Set<string>();
+      for (const s of results) {
+        if (!typesAdded.has(s.type)) {
+          stockCard.push(s);
+          typesAdded.add(s.type);
         }
-
-        // Only show first stock/index/crypto/gold on homepage
-        if ((type === "stock" && !firstStockShown) ||
-            (type === "index" && !firstIndexShown) ||
-            (type === "crypto" && !firstCryptoShown) ||
-            (type === "commodity" && !firstGoldShown)) {
-
-          computed.push(stockDisplay);
-          if (type === "stock") firstStockShown = true;
-          if (type === "index") firstIndexShown = true;
-          if (type === "crypto") firstCryptoShown = true;
-          if (type === "commodity") firstGoldShown = true;
-        }
-
-      } catch (err) {
-        console.error("Error processing symbol", s.symbol, err);
+        if (typesAdded.size === 4) break;
       }
-    }
 
-    if (mountedRef.current) setDisplayStocks(computed);
-    setLoading(false);
+      if (mountedRef.current) setDisplayStocks(stockCard);
+    } catch (err) {
+      console.error("loadData error", err);
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
   };
 
   useEffect(() => {
     loadData();
-    const id = setInterval(loadData, 60_000);
+    const id = setInterval(loadData, 60_000); // refresh every minute
     return () => clearInterval(id);
   }, []);
 
@@ -225,8 +150,6 @@ const computeDefaultStopTargets = (prev: number, signal: string) => {
 
       <div className="mb-4 flex flex-wrap gap-2 items-center">
         <button onClick={() => router.push("/watchlist")} className="bg-yellow-500 text-white px-4 py-2 rounded">Pro Member Watchlist</button>
-        
-        
         <span className="text-sm text-gray-600 ml-2">*Educational Research Work</span>
       </div>
 
@@ -244,12 +167,33 @@ const computeDefaultStopTargets = (prev: number, signal: string) => {
       {loading ? (
         <div>Loading…</div>
       ) : (
-        (searchResults.length ? searchResults : displayStocks).map(s => (
-          <div key={`${s.symbol}-${s.type}`} className="mb-3">
+        (searchResults.length ? searchResults : displayStocks).map((s) => {
+  const signal: "BUY" | "SELL" | "HOLD" =
+    s.signal === "BUY" || s.signal === "SELL" ? s.signal : "HOLD";
 
-            <StockCard {...s} />
-          </div>
-        ))
+  const hitStatus: "ACTIVE" | "TARGET ✅" | "STOP ❌" =
+    s.hitStatus === "TARGET ✅" || s.hitStatus === "STOP ❌" ? s.hitStatus : "ACTIVE";
+
+  return (
+    <div key={`${s.symbol}-${s.type}`} className="mb-3">
+      <StockCard
+        symbol={s.symbol}
+        price={s.price}
+        previousClose={s.previousClose} // optional but safe
+        signal={signal}                 // type-safe
+        confidence={s.confidence ?? 50}
+        stoploss={s.stoploss}
+        targets={s.targets}
+        hitStatus={hitStatus}           // type-safe
+        type={s.type as "stock" | "index" | "crypto" | "commodity"}
+        support={s.support}
+        resistance={s.resistance}
+        explanation={s.explanation ?? ""}
+      />
+    </div>
+  );
+})
+
       )}
     </div>
   );

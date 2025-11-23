@@ -1,176 +1,143 @@
-// src/supabase/trades.ts
-
 import { supabase } from "@/src/lib/supabaseClient";
 
-/*
-|-------------------------------------------------------------------------- 
-| Interfaces (unchanged)
-|-------------------------------------------------------------------------- 
-*/
+export type TradeType = "stock" | "crypto" | "index" | "commodity";
+export type Direction = "long" | "short";
+export type TradeStatus = "open" | "closed" | "target_hit";
+
 export interface TradePayload {
   userEmail: string;
   symbol: string;
-  type: "stock" | "index" | "crypto" | "commodity";
-  direction: "long" | "short";
+  type: TradeType;
+  direction: Direction;
   entryPrice: number;
-  confidence: number;
-  status: "active" | "target_hit" | "stop_loss";
-  provider: string;
-  timestamp: number;
-  stopLoss?: number;
+  stopLoss?: number; // optional, undefined if not set
   targets?: number[];
+  confidence: number;
+  provider: string;
+  note?: string;
+  status: TradeStatus;
+  timestamp: number;
   hitPrice?: number;
   hitTargetIndex?: number;
-  note?: string; // <-- add this
 }
 
 export interface TargetHitPayload extends TradePayload {
-  hitPrice: number;
-  hitTargetIndex: number;
-  note?: string; // optional note
-}
-
-export interface TargetHitPayload extends TradePayload {
+  status: "target_hit"; // must be this
   hitPrice: number;
   hitTargetIndex: number;
 }
 
-/*
-|-------------------------------------------------------------------------- 
-| 1) Save or Update Active Trade — FIXED
-|-------------------------------------------------------------------------- 
-*/
-export default async function saveTradeToSupabase(payload: TradePayload) {
+// -------------------- Save Trade --------------------
+export async function saveTrade(payload: TradePayload) {
   try {
     const { data: auth } = await supabase.auth.getUser();
-    const supaUser = auth?.user;
-    if (!supaUser?.id) return null;
+    const user = auth?.user;
+    if (!user?.id) return null;
 
-    // fetch existing active trade
-    const { data: existingActive } = await supabase
-      .from("trades")
-      .select("*")
-      .eq("user_id", supaUser.id)
-      .eq("symbol", payload.symbol)
-      .eq("status", "active");
-
-    const existing = existingActive?.[0] ?? null;
-
-    /*
-    |------------------------------------------------------------
-    | IMPORTANT FIX
-    |------------------------------------------------------------
-    | If payload contains hitPrice or hitTargetIndex:
-    | → Do NOT update existing "active"
-    | → Insert a NEW row instead
-    |------------------------------------------------------------
-    */
-    const isTargetHit = !!payload.hitPrice || !!payload.hitTargetIndex;
-
-    if (isTargetHit) {
-      // create a new target-hit record
-      return await saveTargetHitToSupabase({
+    // If it's a target hit, call dedicated function
+    if (payload.status === "target_hit") {
+      if (!payload.hitPrice || !payload.hitTargetIndex) return null;
+      return await saveTargetHit({
         ...payload,
-        hitPrice: payload.hitPrice!,
-        hitTargetIndex: payload.hitTargetIndex!,
+        status: "target_hit",
+        hitPrice: payload.hitPrice,
+        hitTargetIndex: payload.hitTargetIndex,
       });
     }
 
-    // build normal trade data
-    const tradeData: any = {
-      user_id: supaUser.id,
+    // Check if active trade exists
+    const { data: existing } = await supabase
+      .from("trades")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("symbol", payload.symbol)
+      .eq("status", "open")
+      .limit(1);
+
+    const tradeData = {
+      user_id: user.id,
       user_email: payload.userEmail,
       symbol: payload.symbol,
       type: payload.type,
       direction: payload.direction,
       entry_price: payload.entryPrice,
-      stop_loss: payload.stopLoss ?? null,
-      targets: payload.targets ?? null,
+      stop_loss: payload.stopLoss ?? undefined,
+      targets: payload.targets ?? undefined,
       confidence: payload.confidence,
       status: payload.status,
       provider: payload.provider,
       note: payload.note ?? "",
       timestamp: payload.timestamp,
-
       hit_price: null,
       hit_target_index: null,
       hit_timestamp: null,
     };
 
-    // update existing active trade (normal case)
-    if (existing?.id) {
+    if (existing?.length) {
       const { data, error } = await supabase
         .from("trades")
         .update(tradeData)
-        .eq("id", existing.id)
-        .eq("user_id", supaUser.id)
+        .eq("id", existing[0].id)
         .select();
-
       if (error) {
-        console.error("🔴 Error updating trade:", error);
+        console.error("Supabase update failed:", error);
         return null;
       }
-
       return data?.[0] ?? null;
     }
 
-    // insert new active trade if none exist
-    const { data, error } = await supabase.from("trades").insert(tradeData).select();
-
+    const { data, error } = await supabase
+      .from("trades")
+      .insert([tradeData])
+      .select();
     if (error) {
-      console.error("🔴 Error inserting new trade:", error);
+      console.error("Supabase insert failed:", error);
       return null;
     }
-
     return data?.[0] ?? null;
   } catch (err) {
-    console.error("🔥 saveTradeToSupabase() Error:", err);
+    console.error("saveTrade() failed:", err);
     return null;
   }
 }
 
-/*
-|-------------------------------------------------------------------------- 
-| 2) Save Target Hit — Always inserts new row (unchanged)
-|-------------------------------------------------------------------------- 
-*/
-export async function saveTargetHitToSupabase(payload: TargetHitPayload) {
+// -------------------- Save Target Hit --------------------
+export async function saveTargetHit(payload: TargetHitPayload) {
   try {
     const { data: auth } = await supabase.auth.getUser();
-    const supaUser = auth?.user;
+    const user = auth?.user;
+    if (!user?.id) return null;
 
-    if (!supaUser?.id) return null;
-
-    const tradeData: any = {
-      user_id: supaUser.id,
+    const tradeData = {
+      user_id: user.id,
       user_email: payload.userEmail,
       symbol: payload.symbol,
       type: payload.type,
       direction: payload.direction,
       entry_price: payload.entryPrice,
-      stop_loss: payload.stopLoss ?? null,
-      targets: payload.targets ?? null,
+      stop_loss: payload.stopLoss ?? undefined,
+      targets: payload.targets ?? undefined,
       confidence: payload.confidence,
       status: "target_hit",
       provider: payload.provider,
       note: payload.note ?? "",
       timestamp: payload.timestamp ?? Date.now(),
-
       hit_price: payload.hitPrice,
       hit_target_index: payload.hitTargetIndex,
       hit_timestamp: Date.now(),
     };
 
-    const { data, error } = await supabase.from("trades").insert(tradeData).select();
-
+    const { data, error } = await supabase
+      .from("trades")
+      .insert([tradeData])
+      .select();
     if (error) {
-      console.error("🔴 Error inserting target hit trade:", error);
+      console.error("Supabase insert (target hit) failed:", error);
       return null;
     }
-
     return data?.[0] ?? null;
   } catch (err) {
-    console.error("🔥 saveTargetHitToSupabase() Error:", err);
+    console.error("saveTargetHit() failed:", err);
     return null;
   }
 }

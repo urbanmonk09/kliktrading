@@ -1,5 +1,4 @@
 // src/api/fetchStockData.ts
-
 export type Provider = "yahoo" | "finnhub";
 
 export interface StockData {
@@ -13,20 +12,15 @@ export interface StockData {
   error?: string;
 }
 
-// Finnhub API 🔑
+// ---------------- ENV KEYS ----------------
 const FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY || "";
 
-// Throttle settings (Yahoo & Finnhub)
-const REQUEST_DELAY = 1500; // 1.5 sec per request
-const FINNHUB_DELAY = 2000; // safer throttle for crypto
-
-// Simple sleep helper
+// ---------------- RATE LIMIT ----------------
+const REQUEST_DELAY = 3000; // 60 calls per 3 mins ~ 3s per call
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-//
-// ------------------ ERROR HANDLER ------------------
-//
-const handleFetchError = (error: string, symbol: string): StockData => ({
+// ---------------- GENERIC ERROR RESPONSE ----------------
+const errorResponse = (symbol: string, msg: string): StockData => ({
   symbol,
   current: 0,
   previousClose: 0,
@@ -34,137 +28,112 @@ const handleFetchError = (error: string, symbol: string): StockData => ({
   highs: [],
   lows: [],
   volumes: [],
-  error,
+  error: msg,
 });
 
-//
-// ------------------ YAHOO SYMBOL FORMATTER ------------------
-//
-function resolveYahooSymbol(symbol: string): string {
-  let clean = symbol.replace(/^NSE:/, "");
+// ---------------- SYMBOL NORMALIZER ----------------
+function formatSymbol(symbol: string) {
+  let s = symbol.replace(/^NSE:/, "").replace(/\s+/g, "");
 
-  // Gold futures support
-  if (clean === "GC=F" || clean === "XAUUSD=X") return clean;
+  // Crypto goes to Finnhub
+  if (s.includes("BTC") || s.includes("ETH")) return s;
 
-  // Indices already valid (example: ^NIFTY50)
-  if (clean.startsWith("^")) return clean;
+  // Index support
+  if (s.startsWith("^")) return s;
 
-  // Crypto never goes via Yahoo
-  if (clean.includes("BTC") || clean.includes("ETH") || clean.includes("USDT")) return clean;
-
-  // Default — NSE equities
-  return `${clean}.NS`;
+  // NSE extension
+  return `${s}.NS`;
 }
 
-//
-// ------------------ FINNHUB FETCH ------------------
-//
+// ---------------- YAHOO FINANCE ----------------
+async function fetchYahoo(symbol: string): Promise<StockData> {
+  try {
+    const formatted = formatSymbol(symbol);
+
+    const response = await fetch("/api/yahooStock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols: [formatted] }),
+    });
+
+    if (!response.ok) {
+      return errorResponse(symbol, `Yahoo route failed (${response.status})`);
+    }
+
+    const json = await response.json();
+    const entry = json[formatted] || json[symbol];
+    if (!entry) return errorResponse(symbol, "No Yahoo data found");
+
+    const previousClose = entry.previousClose || entry.close || entry.regularMarketPreviousClose || 0;
+    const current = entry.current && entry.current > 0 ? entry.current : previousClose;
+
+    return {
+      symbol,
+      current,
+      previousClose,
+      prices: entry.prices ?? [],
+      highs: entry.highs ?? [],
+      lows: entry.lows ?? [],
+      volumes: entry.volumes ?? [],
+      error: "",
+    };
+  } catch (err) {
+    console.error(`Yahoo fetch error for ${symbol}`, err);
+    return errorResponse(symbol, "Yahoo fetch failed");
+  }
+}
+
+// ---------------- FINNHUB ----------------
 async function fetchFinnhub(symbol: string): Promise<StockData> {
-  if (!FINNHUB_API_KEY)
-    return handleFetchError("Finnhub API key missing", symbol);
+  if (!FINNHUB_API_KEY) return errorResponse(symbol, "Missing Finnhub key");
 
   try {
     const url = `https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_API_KEY}`;
     const res = await fetch(url);
-
-    if (!res.ok) throw new Error(`Finnhub HTTP ${res.status}`);
-
     const data = await res.json();
+
+    const current = data.c > 0 ? data.c : data.pc;
 
     return {
       symbol,
-      current: data.c ?? 0,
-      previousClose: data.pc ?? data.c ?? 0,
+      current,
+      previousClose: data.pc ?? current,
       prices: [],
-      highs: [data.h ?? 0],
-      lows: [data.l ?? 0],
+      highs: [data.h ?? current],
+      lows: [data.l ?? current],
       volumes: [],
       error: "",
     };
   } catch (err) {
-    console.error(`Finnhub fetch error for ${symbol}:`, err);
-    return handleFetchError("Fetch failed", symbol);
+    console.error(`Finnhub fetch error for ${symbol}`, err);
+    return errorResponse(symbol, "Finnhub fetch failed");
   }
 }
 
-//
-// ------------------ YAHOO FETCH ------------------
-//
-async function fetchYahoo(symbol: string): Promise<StockData> {
-  try {
-    const yahooSymbol = resolveYahooSymbol(symbol);
+// ---------------- SINGLE FETCH ----------------
+export async function fetchStockData(symbol: string, provider?: Provider): Promise<StockData> {
+  const selectedProvider: Provider =
+    provider ?? (symbol.includes("BTC") || symbol.includes("ETH") ? "finnhub" : "yahoo");
 
-    const res = await fetch("/api/yahooStock", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbols: [yahooSymbol] }),
-    });
-
-    if (!res.ok) throw new Error(`Yahoo HTTP ${res.status}`);
-
-    const json = await res.json();
-    const data = json[yahooSymbol];
-
-    if (!data) return handleFetchError("No data received", symbol);
-
-    return {
-      symbol,
-      current: data.current ?? data.previousClose ?? 0,
-      previousClose: data.previousClose ?? 0,
-      prices: data.prices ?? [],
-      highs: data.highs ?? [],
-      lows: data.lows ?? [],
-      volumes: data.volumes ?? [],
-      error: "",
-    };
-  } catch (err) {
-    console.error(`Yahoo fetch error for ${symbol}:`, err);
-    return handleFetchError("Fetch failed", symbol);
-  }
+  return selectedProvider === "finnhub" ? fetchFinnhub(symbol) : fetchYahoo(symbol);
 }
 
-//
-// ------------------ AUTO ROUTED FETCH ------------------
-//
-export async function fetchStockData(
-  symbol: string,
-  provider?: Provider
-): Promise<StockData> {
-
-  // Auto-detection if provider isn't manually passed
-  const chosenProvider: Provider =
-    provider ??
-    (symbol.includes("BTC") || symbol.includes("ETH") || symbol.includes("USDT")
-      ? "finnhub"
-      : "yahoo");
-
-  return chosenProvider === "finnhub"
-    ? fetchFinnhub(symbol)
-    : fetchYahoo(symbol);
-}
-
-//
-// ------------------ MULTI FETCH (WITH THROTTLE + AUTO PROVIDER) ------------------
-//
-export async function fetchMultipleStockData(
-  symbols: string[]
-): Promise<StockData[]> {
-  const result: StockData[] = [];
+// ---------------- MULTIPLE SYMBOLS (parallel + throttling) ----------------
+export async function fetchMultipleStockData(symbols: string[]): Promise<StockData[]> {
+  const results: StockData[] = [];
 
   for (let i = 0; i < symbols.length; i++) {
     const symbol = symbols[i];
-
-    // Auto-provider routing for each symbol individually
-    const provider: Provider = symbol.includes("BTC") || symbol.includes("ETH")
-      ? "finnhub"
-      : "yahoo";
+    const provider: Provider =
+      symbol.includes("BTC") || symbol.includes("ETH") ? "finnhub" : "yahoo";
 
     const data = await fetchStockData(symbol, provider);
-    result.push(data);
+    results.push(data);
 
-    // Enforce throttling depending on provider
-    await sleep(provider === "finnhub" ? FINNHUB_DELAY : REQUEST_DELAY);
+    // Throttle to 60 calls per 3 minutes
+    if ((i + 1) % 60 === 0) await sleep(180_000);
+    else await sleep(REQUEST_DELAY);
   }
 
-  return result;
+  return results;
 }

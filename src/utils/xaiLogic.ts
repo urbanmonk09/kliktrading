@@ -436,16 +436,17 @@ export function generateSMCSignal(stock: StockData): SignalResult {
 // --- StockDisplay Type for UI ---
 // =========================================================
 
-export type StockDisplay = {
+export interface StockDisplay {
   symbol: string;
-  signal: "BUY" | "SELL" | "HOLD";
-  confidence: number;
-  explanation: string;
-  price?: number;
-  type: "stock" | "index" | "crypto" | "commodity";
+  price: number;
+  previousClose: number;       // <-- Add this
+  signal: string;              // BUY / SELL / HOLD
+  confidence: number;          // 0 - 100
+  stoploss: number;
+  targets: number[];
+  hitStatus: "TARGET ✅" | "STOP ❌" | "ACTIVE";
+  type: "stock" | "crypto" | "index" | "commodity";
   support?: number;
   resistance?: number;
-  stoploss?: number;
-  targets?: number[];
-  hitStatus?: "ACTIVE" | "TARGET ✅" | "STOP ❌";
-};
+  explanation?: string;
+}
