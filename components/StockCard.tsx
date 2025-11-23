@@ -30,6 +30,11 @@ export default function StockCard({
   resistance,
   hitStatus,
 }: StockCardProps) {
+
+  // Display override: BUY → LONG, SELL → SHORT
+  const displaySignal =
+    signal === "BUY" ? "LONG" : signal === "SELL" ? "SHORT" : "HOLD";
+
   const adjustedConfidence =
     signal === "HOLD"
       ? 50
@@ -66,6 +71,7 @@ export default function StockCard({
 
   return (
     <div className="bg-white p-4 rounded-lg shadow flex items-center gap-4">
+
       {/* Left: Confidence Donut */}
       <div className="w-16 h-16 relative flex-shrink-0">
         <svg viewBox="0 0 36 36" className="w-full h-full">
@@ -94,40 +100,47 @@ export default function StockCard({
         </div>
       </div>
 
-      {/* Right: Info */}
+      {/* Right Section */}
       <div className="flex-1 flex flex-col gap-1">
+
         <div className="flex justify-between items-center">
           <h2 className="font-bold text-lg">{symbol}</h2>
           <span
-            className={`px-2 py-1 rounded font-semibold text-white ${
+            className={`px-2 py-1 rounded font-semibold text-white 
+            ${
               signal === "BUY"
                 ? "bg-green-600"
                 : signal === "SELL"
                 ? "bg-red-600"
-                : "bg-gray-400"
+                : "bg-gray-500"
             }`}
           >
-            {signal}
+            {displaySignal}
           </span>
         </div>
 
         <p className="text-sm">
           Price: <span className="font-medium">{price ?? "-"}</span>
         </p>
+
         <p className="text-sm">
           Stoploss: <span className="font-medium">{stoploss ?? "-"}</span>
         </p>
+
         {targets.length > 0 && (
           <p className="text-sm">
-            Targets: {targets.map((t) => t.toFixed(2)).join(", ")}
+            Targets: {targets.map((t) => t.toFixed(2)).join(" , ")}
           </p>
         )}
+
         {support !== undefined && (
           <p className="text-sm">Support: {support.toFixed(2)}</p>
         )}
+
         {resistance !== undefined && (
           <p className="text-sm">Resistance: {resistance.toFixed(2)}</p>
         )}
+
         {hitStatus && (
           <p
             className={`text-sm font-semibold ${
@@ -141,6 +154,7 @@ export default function StockCard({
             {hitStatus}
           </p>
         )}
+
         {explanation && (
           <p className="text-xs text-gray-500 mt-1">{explanation}</p>
         )}

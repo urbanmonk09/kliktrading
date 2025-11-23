@@ -19,7 +19,7 @@ export default function NotificationToast({
   onClose?: () => void;
 }) {
   useEffect(() => {
-    const t = setTimeout(() => onClose && onClose(), 5000);
+    const t = setTimeout(() => onClose && onClose(), 5000); // Auto-close after 5 seconds
     return () => clearTimeout(t);
   }, [onClose]);
 

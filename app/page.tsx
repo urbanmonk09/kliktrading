@@ -20,13 +20,23 @@ export default function HomePage() {
   const [searchResults, setSearchResults] = useState<StockDisplay[]>([]);
   const [supabaseUser, setSupabaseUser] = useState<any>(null);
   const [targetHitTrade, setTargetHitTrade] = useState<any | null>(null);
-  const [toast, setToast] = useState<{ message: string; bg: string } | null>(null);
+
+  const [toast, setToast] = useState<{
+    message: string;
+    bg: string;
+    currentPrice?: number;
+    stoploss?: number;
+    targets?: number[];
+    timestamp?: number;
+  } | null>(null);
 
   const mountedRef = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   // Supabase auth + saved trades
@@ -54,31 +64,49 @@ export default function HomePage() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // small beep
-  const playBeep = () => {
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = 880;
-      gain.gain.value = 0.04;
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      setTimeout(() => { osc.stop(); ctx.close(); }, 150);
-    } catch {}
-  };
+  // Compute stoploss and targets
+const computeDefaultStopTargets = (prev: number, signal: string) => {
+  // Default values (for HOLD or unknown signal)
+  let stoploss = prev;
+  let targets = [prev];
 
-  const computeDefaultStopTargets = (prev: number, signal: string) => {
-    const stoploss = signal === "BUY" ? prev * 0.98 : prev * 1.02;
-    const targets = signal === "BUY"
-      ? [prev * 1.05, prev * 1.1, prev * 1.2]
-      : [prev * 0.95, prev * 0.9, prev * 0.8];
-    return { stoploss, targets };
-  };
+  // Percent values
+  const SL_PERCENT = 0.006;   // 0.6%
+  const T1_PERCENT = 0.0078;  // 0.78%
+  const T2_PERCENT = 0.01;    // 1.00%
+  const T3_PERCENT = 0.0132;  // 1.32%
 
-  // load all stock data
+  switch (signal) {
+    case "BUY":
+      stoploss = prev * (1 - SL_PERCENT);
+      targets = [
+        prev * (1 + T1_PERCENT),
+        prev * (1 + T2_PERCENT),
+        prev * (1 + T3_PERCENT),
+      ];
+      break;
+
+    case "SELL":
+      stoploss = prev * (1 + SL_PERCENT);
+      targets = [
+        prev * (1 - T1_PERCENT),
+        prev * (1 - T2_PERCENT),
+        prev * (1 - T3_PERCENT),
+      ];
+      break;
+
+    // HOLD or unsupported signal → defaults stay as previous
+    default:
+      stoploss = prev;
+      targets = [prev];
+      break;
+  }
+
+  return { stoploss, targets };
+};
+
+
+  // Load homepage stocks
   const loadData = async () => {
     setLoading(true);
     const computed: StockDisplay[] = [];
@@ -94,7 +122,6 @@ export default function HomePage() {
         const stock: StockData = await fetchStockData(s.symbol, provider);
         if (!stock || stock.error) continue;
 
-        // Ensure current price is never zero
         const price = stock.current || stock.previousClose || 0;
         const prev = stock.previousClose || price;
 
@@ -112,11 +139,11 @@ export default function HomePage() {
           ? Math.min(100, Math.max(70, applyAdaptiveConfidence(smc.confidence ?? 50, RL.getWeight(s.symbol))))
           : 50;
 
-        const displaySymbol = s.symbol.replace(/\.NS$/, "");
+        const displaySymbol = s.symbol.replace(/\.NS(\.NS)?$/, ""); // remove duplicate .NS
 
         const type: StockDisplay["type"] =
           displaySymbol === "XAUUSD" ? "commodity" :
-          displaySymbol === "BTCUSDT" || displaySymbol === "ETHUSDT" ? "crypto" :
+          displaySymbol.includes("BTC") || displaySymbol.includes("ETH") ? "crypto" :
           s.type === "index" ? "index" : "stock";
 
         const stockDisplay: StockDisplay = {
@@ -133,7 +160,19 @@ export default function HomePage() {
           hitStatus: targets.length ? (price >= Math.max(...targets) ? "TARGET ✅" : price <= stoploss ? "STOP ❌" : "ACTIVE") : "ACTIVE",
         };
 
-        // Show only first stock/index/crypto/gold on homepage
+        // Show toast for signals
+        if (smc.signal === "BUY" || smc.signal === "SELL") {
+          setToast({
+            message: `Signal: ${smc.signal} (${displaySymbol})`,
+            currentPrice: price,
+            stoploss,
+            targets,
+            timestamp: Date.now(),
+            bg: smc.signal === "BUY" ? "bg-green-600" : "bg-red-600",
+          });
+        }
+
+        // Only show first stock/index/crypto/gold on homepage
         if ((type === "stock" && !firstStockShown) ||
             (type === "index" && !firstIndexShown) ||
             (type === "crypto" && !firstCryptoShown) ||
@@ -147,7 +186,7 @@ export default function HomePage() {
         }
 
       } catch (err) {
-        console.error("symbol processing error", s.symbol, err);
+        console.error("Error processing symbol", s.symbol, err);
       }
     }
 
@@ -163,7 +202,7 @@ export default function HomePage() {
 
   const handleSearch = () => {
     if (!supabaseUser) {
-      setToast({ message: "Only Pro member access", bg: "bg-red-600" });
+      setToast({ message: "Only Pro members can search", bg: "bg-red-600" });
       return;
     }
     const term = search.trim().toLowerCase();
@@ -172,12 +211,22 @@ export default function HomePage() {
 
   return (
     <div className="p-6 bg-gray-100 min-h-screen">
-      {toast && <NotificationToast message={toast.message} bg={toast.bg} onClose={() => setToast(null)} />}
+      {toast && (
+        <NotificationToast
+          message={toast.message}
+          currentPrice={toast.currentPrice}
+          stoploss={toast.stoploss}
+          targets={toast.targets}
+          timestamp={toast.timestamp}
+          bg={toast.bg}
+          onClose={() => setToast(null)}
+        />
+      )}
 
       <div className="mb-4 flex flex-wrap gap-2 items-center">
         <button onClick={() => router.push("/watchlist")} className="bg-yellow-500 text-white px-4 py-2 rounded">Pro Member Watchlist</button>
-        <button onClick={handleSearch} className="px-4 py-2 rounded text-white bg-blue-500">Search</button>
-        <button onClick={() => router.push("/")} className="bg-gray-500 text-white px-4 py-2 rounded">Back to Home</button>
+        
+        
         <span className="text-sm text-gray-600 ml-2">*Educational Research Work</span>
       </div>
 
@@ -197,6 +246,7 @@ export default function HomePage() {
       ) : (
         (searchResults.length ? searchResults : displayStocks).map(s => (
           <div key={`${s.symbol}-${s.type}`} className="mb-3">
+
             <StockCard {...s} />
           </div>
         ))

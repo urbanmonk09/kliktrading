@@ -1,197 +1,402 @@
-// src/app/(store)/watchlist/page.tsx
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState, useRef, useContext } from "react";
+import Link from "next/link";
+
 import StockCard from "@/components/StockCard";
 import NotificationToast from "@/components/NotificationToast";
-import { supabase } from "@/src/lib/supabaseClient";
-import { getTargetHitTrades } from "@/src/supabase/getUserTrades";
-import { RL } from "@/src/quant/rlModel";
-import { applyAdaptiveConfidence } from "@/src/quant/confidenceEngine";
+import { fetchStockData, Provider, StockData } from "@/src/api/fetchStockData";
 import { generateSMCSignal, StockDisplay } from "@/src/utils/xaiLogic";
 import { symbols as allSymbolsRaw } from "@/src/api/symbols";
-import { fetchStockData, Provider, StockData } from "@/src/api/fetchStockData";
-import { useRouter } from "next/navigation"; // <-- add this
-type Tab = "TOP" | "STOCK" | "CRYPTO" | "INDEX";
+import { AuthContext } from "@/src/context/AuthContext";
+import { supabase } from "@/src/lib/supabaseClient";
+
+// Table names used in Supabase:
+// - trades (upsert current active trade per user+symbol)
+//   columns: id (uuid), user_email, symbol, type, direction (long/short), entry_price, stoploss, targets (jsonb), confidence, status (active/target_hit/stop_hit), last_updated
+// - trade_history (append-only backtest log)
+//   columns: id (uuid), user_email, symbol, entry_price, exit_price, outcome (target|stop), target_index (1|2|3|null), timestamp
+
+type TabType = "top" | "stock" | "index" | "crypto" | "commodity" | "all";
 
 export default function WatchlistPage() {
-  const router = useRouter();
-  const [supabaseUser, setSupabaseUser] = useState<any>(null);
+  const { user } = useContext(AuthContext);
+  const userEmail = (user as any)?.email ?? "";
+
+  const [livePrices, setLivePrices] = useState<Record<string, { price: number; previousClose: number; lastUpdated: number }>>({});
   const [displayStocks, setDisplayStocks] = useState<StockDisplay[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [toast, setToast] = useState<{ message: string; bg: string } | null>(null);
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<Tab>("TOP");
+  const [activeTab, setActiveTab] = useState<TabType>("top");
+  const [toast, setToast] = useState<{ msg: string; bg?: string } | null>(null);
 
   const mountedRef = useRef(true);
+  const REFRESH_INTERVAL = 180_000; // 3 min
 
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
   }, []);
 
-  // Supabase auth
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getUser();
-      if (data?.user) {
-        setSupabaseUser(data.user);
-      }
-    })();
+  const apiSymbol = (symbol: string) => {
+    if (symbol === "BTC/USD") return "BTC-USD";
+    if (symbol === "ETH/USD") return "ETH-USD";
+    if (symbol === "XAU/USD") return "GC=F";
+    return symbol;
+  };
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        setSupabaseUser(session.user);
-      } else {
-        setSupabaseUser(null);
-      }
-    });
+  // Risk model from earlier conversation
+  const computeRiskModel = (prev: number, signal: string) => {
+    let stoploss = prev;
+    let targets = [prev];
 
-    return () => listener.subscription.unsubscribe();
-  }, []);
+    const SL = 0.006;
+    const T1 = 0.0078;
+    const T2 = 0.01;
+    const T3 = 0.0132;
 
-  const computeDefaultStopTargets = (prev: number, signal: string) => {
-    const stoploss = signal === "BUY" ? prev * 0.98 : prev * 1.02;
-    const targets = signal === "BUY"
-      ? [prev * 1.05, prev * 1.1, prev * 1.2]
-      : [prev * 0.95, prev * 0.9, prev * 0.8];
+    if (signal === "BUY") {
+      stoploss = prev * (1 - SL);
+      targets = [prev * (1 + T1), prev * (1 + T2), prev * (1 + T3)];
+    } else if (signal === "SELL") {
+      stoploss = prev * (1 + SL);
+      targets = [prev * (1 - T1), prev * (1 - T2), prev * (1 - T3)];
+    }
+
     return { stoploss, targets };
   };
 
-  const loadData = async () => {
-    if (!supabaseUser) {
-      setToast({ message: "Pro membership required!", bg: "bg-red-600" });
-      return;
+  // ---------------------- Supabase persistence helpers ----------------------
+  // Upsert (insert or update) current active trade for user+symbol
+  async function upsertTradeToSupabase(trade: {
+    user_email: string;
+    symbol: string;
+    type: string;
+    direction: "long" | "short" | null;
+    entry_price: number | null;
+    stoploss: number | null;
+    targets: number[] | null;
+    confidence: number | null;
+    status: string;
+  }) {
+    try {
+      const { data, error } = await supabase
+        .from("trades")
+        .upsert(
+          [
+            {
+              user_email: trade.user_email,
+              symbol: trade.symbol,
+              type: trade.type,
+              direction: trade.direction,
+              entry_price: trade.entry_price,
+              stoploss: trade.stoploss,
+              targets: trade.targets,
+              confidence: trade.confidence,
+              status: trade.status,
+              last_updated: new Date().toISOString(),
+            },
+          ],
+          { onConflict: "user_email,symbol" }
+
+        );
+
+      if (error) console.error("Supabase upsert error:", error);
+      return data;
+    } catch (err) {
+      console.error("upsertTradeToSupabase error", err);
+      return null;
     }
+  }
 
-    setLoading(true);
-    const computed: StockDisplay[] = [];
+  // Append a row to trade_history when a target/stop is hit
+  async function logTradeHistory(entry: {
+    user_email: string;
+    symbol: string;
+    entry_price: number | null;
+    exit_price: number | null;
+    outcome: "target" | "stop";
+    target_index?: number | null;
+    timestamp?: string;
+  }) {
+    try {
+      const payload = {
+        ...entry,
+        timestamp: entry.timestamp ?? new Date().toISOString(),
+      };
+      const { data, error } = await supabase.from("trade_history").insert([payload]);
+      if (error) console.error("Supabase trade_history insert error:", error);
+      return data;
+    } catch (err) {
+      console.error("logTradeHistory error", err);
+      return null;
+    }
+  }
 
-    for (const s of allSymbolsRaw) {
-      try {
-        // Determine provider
-        const provider: Provider = s.type === "stock" || s.type === "index" || s.type === "commodity" ? "yahoo" : "finnhub";
-        const stock: StockData = await fetchStockData(s.symbol, provider);
-        if (!stock || stock.error) continue;
+  // Subscribe to trades table changes for real-time notifications (optional)
+  useEffect(() => {
+    if (!userEmail) return;
+    const channel = supabase
+      .channel(`public:trades:user=${userEmail}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "trades", filter: `user_email=eq.${userEmail}` },
+        (payload) => {
+          // When a trade row updates, show notification
+          const newRow = (payload as any).new;
+          if (!newRow) return;
 
-        // Ensure current price never zero
-        const price = stock.current || stock.previousClose || 0;
-        const prev = stock.previousClose || price;
+          // If status moved to target_hit or stop_hit, show notification
+          if (newRow.status === "target_hit") {
+            const title = `TARGET HIT: ${newRow.symbol}`;
+            const body = `Target reached at ${newRow.exit_price ?? "--"}`;
+            // Browser notification
+            if (typeof window !== "undefined" && "Notification" in window) {
+              if (Notification.permission === "granted") {
+                new Notification(title, { body });
+              } else if (Notification.permission !== "denied") {
+                Notification.requestPermission();
+              }
+            }
+            setToast({ msg: `${title} — ${body}`, bg: "bg-green-600" });
+          } else if (newRow.status === "stop_hit") {
+            const title = `STOP LOSS: ${newRow.symbol}`;
+            const body = `Stop hit at ${newRow.exit_price ?? "--"}`;
+            if (typeof window !== "undefined" && "Notification" in window) {
+              if (Notification.permission === "granted") new Notification(title, { body });
+              else if (Notification.permission !== "denied") Notification.requestPermission();
+            }
+            setToast({ msg: `${title} — ${body}`, bg: "bg-red-600" });
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userEmail]);
+
+  // ---------------------- Fetch prices loop ----------------------
+  useEffect(() => {
+    let allowed = true;
+
+    const fetchPrices = async () => {
+      const now = Date.now();
+
+      for (const s of allSymbolsRaw) {
+        const sym = apiSymbol(s.symbol);
+        const last = livePrices[sym]?.lastUpdated ?? 0;
+        if (now - last < REFRESH_INTERVAL) continue;
+
+        try {
+          const provider: Provider = s.type === "crypto" ? "finnhub" : "yahoo";
+          const resp: StockData = await fetchStockData(sym, provider);
+
+          if (!allowed) return;
+
+          setLivePrices((prev) => ({
+            ...prev,
+            [sym]: {
+              price: resp.current ?? 0,
+              previousClose: resp.previousClose ?? resp.current ?? 0,
+              lastUpdated: now,
+            },
+          }));
+        } catch (err) {
+          console.warn("Fetch failed for:", s.symbol, err);
+        }
+      }
+    };
+
+    fetchPrices();
+    const interval = setInterval(fetchPrices, 10000);
+
+    return () => { allowed = false; clearInterval(interval); };
+  }, [JSON.stringify(allSymbolsRaw.map((s) => s.symbol)), livePrices]);
+
+  // ---------------------- Build display and persist trades ----------------------
+  useEffect(() => {
+    const run = async () => {
+      const computed: StockDisplay[] = [];
+
+      for (const s of allSymbolsRaw) {
+        const symbolClean = apiSymbol(s.symbol);
+        const live = livePrices[symbolClean] ?? { price: 0, previousClose: 0 };
+        const prevClose = live.previousClose || live.price || 0;
 
         const smc = generateSMCSignal({
           symbol: s.symbol,
-          current: price,
-          previousClose: prev,
-          ohlc: { open: price, high: price, low: price, close: price },
-          history: { prices: stock.prices ?? [], highs: stock.highs ?? [], lows: stock.lows ?? [], volumes: stock.volumes ?? [] },
+          current: live.price,
+          previousClose: prevClose,
+          ohlc: { open: live.price, high: live.price, low: live.price, close: live.price },
+          history: { prices: [], highs: [], lows: [], volumes: [] },
         });
 
-        const { stoploss, targets } = computeDefaultStopTargets(prev, smc.signal);
+        // Compute stoploss/targets using the stable risk model
+        const { stoploss, targets } = computeRiskModel(prevClose, smc.signal);
 
-        const confidence = (smc.signal === "BUY" || smc.signal === "SELL")
-          ? Math.min(100, Math.max(70, applyAdaptiveConfidence(smc.confidence ?? 50, RL.getWeight(s.symbol))))
-          : 50;
+        const hitStatus =
+          live.price >= Math.max(...targets)
+            ? "TARGET ✅"
+            : live.price <= stoploss
+            ? "STOP ❌"
+            : "ACTIVE";
 
-        const displaySymbol = s.symbol.replace(/\.NS$/, "");
+        const type =
+          s.symbol === "XAU/USD" ? "commodity" : s.type === "crypto" ? "crypto" : s.type === "index" ? "index" : "stock";
 
-        const type: StockDisplay["type"] =
-          displaySymbol === "XAUUSD" ? "commodity" :
-          displaySymbol === "BTCUSDT" || displaySymbol === "ETHUSDT" ? "crypto" :
-          s.type === "index" ? "index" : "stock";
+        // Persist trade to Supabase (create or update) if user logged in and we have a BUY/SELL
+        if (userEmail && (smc.signal === "BUY" || smc.signal === "SELL")) {
+          const direction = smc.signal === "BUY" ? "long" : "short";
 
-        computed.push({
-          symbol: displaySymbol,
-          signal: smc.signal,
-          confidence,
-          explanation: smc.explanation ?? "",
-          price,
+          // Upsert trade: entry_price is prevClose (you can change logic to use live.price if desired)
+          await upsertTradeToSupabase({
+            user_email: userEmail,
+            symbol: s.symbol.replace(/\.NS$/, ""),
+            type,
+            direction,
+            entry_price: prevClose,
+            stoploss,
+            targets,
+            confidence: smc.confidence ?? 50,
+            status: "active",
+          });
+        }
+
+        // If the trade was active in DB and hit target or stop, record in trade_history and update trade row
+        // We'll query Supabase for active trade for this user+symbol and then update if needed
+        if (userEmail) {
+          try {
+            const { data: activeTrades, error } = await supabase
+              .from("trades")
+              .select("id,symbol,status,entry_price,targets")
+              .eq("user_email", userEmail)
+              .eq("symbol", s.symbol.replace(/\.NS$/, ""))
+              .eq("status", "active")
+              .limit(1);
+
+            if (error) console.error("supabase select error:", error);
+
+            if (activeTrades && activeTrades.length > 0) {
+              const active = activeTrades[0] as any;
+
+              if (hitStatus === "TARGET ✅") {
+                // determine which target
+                let targetIndex: number | null = null;
+                const tArr: number[] = active.targets ?? targets;
+                for (let i = 0; i < tArr.length; i++) {
+                  if (live.price >= tArr[i]) { targetIndex = i + 1; break; }
+                }
+
+                // log history and update trade status -> target_hit
+                await logTradeHistory({
+                  user_email: userEmail,
+                  symbol: active.symbol,
+                  entry_price: active.entry_price ?? prevClose,
+                  exit_price: live.price,
+                  outcome: "target",
+                  target_index: targetIndex,
+                });
+
+                await supabase.from("trades").update({ status: "target_hit", exit_price: live.price }).match({ id: active.id });
+              } else if (hitStatus === "STOP ❌") {
+                await logTradeHistory({
+                  user_email: userEmail,
+                  symbol: active.symbol,
+                  entry_price: active.entry_price ?? prevClose,
+                  exit_price: live.price,
+                  outcome: "stop",
+                  target_index: null,
+                });
+
+                await supabase.from("trades").update({ status: "stop_hit", exit_price: live.price }).match({ id: active.id });
+              }
+            }
+          } catch (err) {
+            console.error("Error checking/updating active trade:", err);
+          }
+        }
+
+        // Build display object
+        const uiSignal = smc.signal === "BUY" ? "LONG" : smc.signal === "SELL" ? "SHORT" : "HOLD";
+
+        const display: StockDisplay = {
+          symbol: s.symbol.replace(/\.NS$/, ""),
+          price: live.price,
           type,
-          support: prev * 0.995,
-          resistance: prev * 1.01,
+          signal: uiSignal as any,
+          confidence: smc.confidence ?? 50,
           stoploss,
           targets,
-          hitStatus: targets.length ? (price >= Math.max(...targets) ? "TARGET ✅" : price <= stoploss ? "STOP ❌" : "ACTIVE") : "ACTIVE",
-        } as StockDisplay);
+          support: prevClose * 0.995,
+          resistance: prevClose * 1.01,
+          hitStatus,
+          explanation: smc.explanation ?? "",
+        };
 
-      } catch (err) {
-        console.error("symbol processing error", s.symbol, err);
+        computed.push(display);
       }
-    }
 
-    // Rank by confidence for each type
-    const topTrades = [...computed].sort((a, b) => (b.confidence || 0) - (a.confidence || 0)).slice(0, 10);
-    const stocks = computed.filter(s => s.type === "stock").sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
-    const cryptos = computed.filter(s => s.type === "crypto").sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
-    const indices = computed.filter(s => s.type === "index").sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+      if (mountedRef.current) setDisplayStocks(computed);
+    };
 
-    if (mountedRef.current) {
-      setDisplayStocks([...topTrades, ...stocks, ...cryptos, ...indices]);
-    }
-    setLoading(false);
-  };
+    run();
+  }, [livePrices, userEmail]);
+
+  // ---------------------- Filtering and sorting ----------------------
+  const filtered = displayStocks.filter((s) => {
+    const matchSearch = s.symbol.toLowerCase().includes(search.toLowerCase());
+    if (activeTab === "all" || activeTab === "top") return matchSearch;
+    return matchSearch && s.type === activeTab;
+  });
+
+  const sorted = [...filtered].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  const topFive = sorted.slice(0, 5);
 
   useEffect(() => {
-    loadData();
-    const id = setInterval(loadData, 60_000);
-    return () => clearInterval(id);
-  }, [supabaseUser]);
-
-  // Search functionality
-  const filteredStocks = search.trim()
-    ? displayStocks.filter(s => s.symbol.toLowerCase().includes(search.trim().toLowerCase()))
-    : displayStocks;
-
-  const renderTabContent = () => {
-    switch (tab) {
-      case "TOP":
-        return filteredStocks.slice(0, 10);
-      case "STOCK":
-        return filteredStocks.filter(s => s.type === "stock");
-      case "CRYPTO":
-        return filteredStocks.filter(s => s.type === "crypto");
-      case "INDEX":
-        return filteredStocks.filter(s => s.type === "index");
-    }
-  };
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   return (
     <div className="p-6 bg-gray-100 min-h-screen">
-      {toast && <NotificationToast message={toast.message} bg={toast.bg} onClose={() => setToast(null)} />}
-      
-      <div className="mb-4 flex flex-wrap gap-2 items-center">
-        <button onClick={() => router.push("/")} className="bg-gray-500 text-white px-4 py-2 rounded">Back to Home</button>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-xl font-semibold">Watchlist</h1>
+        <Link href="/" className="px-4 py-2 bg-blue-600 text-white rounded">← Home</Link>
       </div>
 
-      <div className="flex gap-2 mb-4">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search (Pro only)"
-          className="flex-1 p-2 rounded border"
-        />
-      </div>
+      {toast && (
+        <div className={`p-3 rounded text-white mb-4 ${toast.bg}`}>{toast.msg}</div>
+      )}
 
-      <div className="flex gap-2 mb-4">
-        {(["TOP", "STOCK", "CRYPTO", "INDEX"] as Tab[]).map(t => (
+      {/* Search */}
+      <input
+        className="w-full p-2 border rounded mb-4"
+        placeholder="Search..."
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+
+      {/* Tabs */}
+      <div className="flex gap-2 mb-6 overflow-x-auto">
+        {["top", "stock", "index", "crypto", "commodity", "all"].map((t) => (
           <button
             key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-2 rounded ${tab === t ? "bg-blue-500 text-white" : "bg-gray-300"}`}
+            onClick={() => setActiveTab(t as TabType)}
+            className={`px-4 py-2 rounded ${ activeTab === t ? "bg-black text-white" : "bg-white border" }`}
           >
-            {t}
+            {t.toUpperCase()}
           </button>
         ))}
       </div>
 
-      {loading ? (
-        <div>Loading…</div>
-      ) : (
-        renderTabContent().map(s => (
-          <div key={`${s.symbol}-${s.type}`} className="mb-3">
-            <StockCard {...s} />
-          </div>
-        ))
-      )}
+      {/* Display */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {(activeTab === "top" ? topFive : sorted).map((s) => (
+          <StockCard key={s.symbol} {...s} />
+        ))}
+      </div>
     </div>
   );
 }
