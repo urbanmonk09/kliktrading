@@ -1,52 +1,41 @@
 # --- STAGE 1: BUILD ---
-# Start from a standard Node.js image for building
 FROM node:18-alpine AS builder
-
-# Set working directory inside the container
-WORKDIR /app
-
-# Copy package.json and package-lock.json (or yarn.lock) first
-# This allows Docker to cache the installation step if dependencies haven't changed
-COPY package.json .
-COPY yarn.lock .
-
-# Install dependencies, including devDependencies
-RUN yarn install --frozen-lockfile
-
-# Copy the rest of the application files
-COPY . .
-
-# Build the Next.js application
-# The output is placed in the .next folder
-RUN yarn build
-
-# --- STAGE 2: PRODUCTION RUNTIME ---
-# Start from a minimal image to run the final application
-# node:18-slim is a great choice for production
-FROM node:18-slim AS runner
-
-# Set the environment variable for production
-ENV NODE_ENV production
-
-# Railway typically exposes on port 3000 by default, 
-# but it's good practice to set it if needed.
-ENV PORT 3000
-EXPOSE 3000
 
 # Set working directory
 WORKDIR /app
 
-# Copy the minimum required files from the builder stage
-# 1. The built application (.next)
-# 2. node_modules (only production dependencies are needed)
-# 3. public files
+# Copy dependency definitions first (for caching)
+COPY package.json package-lock.json ./
+
+# Install all dependencies (dev + prod) for building
+RUN npm ci
+
+# Copy all source files
+COPY . .
+
+# Build Next.js application
+RUN npm run build
+
+# --- STAGE 2: PRODUCTION ---
+FROM node:18-alpine AS runner
+
+# Set environment
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
+
+WORKDIR /app
+
+# Copy build output and public folder
 COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./package.json
 
-# Copy server configuration files, if you have any (e.g., next.config.js)
-COPY next.config.js .
+# Install only production dependencies
+RUN npm ci --omit=dev
 
-# Command to run the application
-CMD ["yarn", "start"]
+# Copy next.config.js if exists
+COPY --from=builder /app/next.config.js ./next.config.js
+
+# Start the Next.js server
+CMD ["npm", "start"]
