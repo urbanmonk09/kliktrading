@@ -106,3 +106,9 @@ export async function fetchStockData(symbol: string, provider: Provider): Promis
   if (provider === "finnhub") return fetchFinnhub(symbol);
   return fetchYahoo(symbol);
 }
+// In src/api/fetchStockData.ts
+
+export async function fetchMultipleStockData(symbols: string[], provider: Provider): Promise<StockData[]> {
+  const stockDataPromises = symbols.map(symbol => fetchStockData(symbol, provider));
+  return Promise.all(stockDataPromises);
+}
