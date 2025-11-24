@@ -16,13 +16,8 @@ export interface StockData {
 const FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY || "";
 
 // ---------------- RATE LIMIT ----------------
-const REQUEST_DELAY = 3000; // 60 calls per 3 minutes ~ 1 call every 3s
-
+const REQUEST_DELAY = 3000; // 60 calls per 3 minutes ~ 3s per call
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
-
-// ---------------- CACHE ----------------
-const CACHE: Record<string, { data: StockData; timestamp: number }> = {};
-const CACHE_TTL = 60_000; // 1 minute cache
 
 // ---------------- GENERIC ERROR RESPONSE ----------------
 const errorResponse = (symbol: string, msg: string): StockData => ({
@@ -39,9 +34,15 @@ const errorResponse = (symbol: string, msg: string): StockData => ({
 // ---------------- SYMBOL NORMALIZER ----------------
 function formatSymbol(symbol: string) {
   let s = symbol.replace(/^NSE:/, "").replace(/\s+/g, "");
-  if (s.includes("BTC") || s.includes("ETH")) return s; // crypto Finnhub
-  if (s.startsWith("^")) return s; // indices
-  return `${s}.NS`; // NSE
+
+  // Crypto goes to Finnhub
+  if (s.includes("BTC") || s.includes("ETH")) return s;
+
+  // Index support
+  if (s.startsWith("^")) return s;
+
+  // NSE extension
+  return `${s}.NS`;
 }
 
 // ---------------- YAHOO FINANCE ----------------
@@ -60,20 +61,23 @@ async function fetchYahoo(symbol: string): Promise<StockData> {
     }
 
     const json = await response.json();
-    const entry = json[formatted] || json[symbol];
-    if (!entry) return errorResponse(symbol, "No Yahoo data found");
+    const quote = json.quoteResponse?.result?.[0];
+    if (!quote) return errorResponse(symbol, "No Yahoo data found");
 
-    const previousClose = entry.previousClose || entry.close || entry.regularMarketPreviousClose || 0;
-    const current = entry.current && entry.current > 0 ? entry.current : previousClose;
+    const current = quote.regularMarketPrice ?? quote.regularMarketPreviousClose ?? 0;
+    const previousClose = quote.regularMarketPreviousClose ?? current;
+    const high = quote.regularMarketDayHigh ?? current;
+    const low = quote.regularMarketDayLow ?? current;
+    const volume = quote.regularMarketVolume ?? 0;
 
     return {
       symbol,
       current,
       previousClose,
-      prices: entry.prices ?? [],
-      highs: entry.highs ?? [],
-      lows: entry.lows ?? [],
-      volumes: entry.volumes ?? [],
+      prices: [current], // fallback array for SMC logic
+      highs: [high],
+      lows: [low],
+      volumes: [volume],
       error: "",
     };
   } catch (err) {
@@ -97,10 +101,10 @@ async function fetchFinnhub(symbol: string): Promise<StockData> {
       symbol,
       current,
       previousClose: data.pc ?? current,
-      prices: [],
+      prices: [current],
       highs: [data.h ?? current],
       lows: [data.l ?? current],
-      volumes: [],
+      volumes: [data.v ?? 0],
       error: "",
     };
   } catch (err) {
@@ -109,26 +113,15 @@ async function fetchFinnhub(symbol: string): Promise<StockData> {
   }
 }
 
-// ---------------- SINGLE FETCH WITH CACHE ----------------
+// ---------------- SINGLE FETCH ----------------
 export async function fetchStockData(symbol: string, provider?: Provider): Promise<StockData> {
-  const now = Date.now();
-  const cached = CACHE[symbol];
-  if (cached && now - cached.timestamp < CACHE_TTL) {
-    return cached.data;
-  }
-
   const selectedProvider: Provider =
     provider ?? (symbol.includes("BTC") || symbol.includes("ETH") ? "finnhub" : "yahoo");
 
-  const data = selectedProvider === "finnhub" ? await fetchFinnhub(symbol) : await fetchYahoo(symbol);
-
-  // Update cache
-  CACHE[symbol] = { data, timestamp: now };
-
-  return data;
+  return selectedProvider === "finnhub" ? fetchFinnhub(symbol) : fetchYahoo(symbol);
 }
 
-// ---------------- MULTIPLE SYMBOLS (RATE-LIMITED) ----------------
+// ---------------- MULTIPLE SYMBOLS (parallel + throttling) ----------------
 export async function fetchMultipleStockData(symbols: string[]): Promise<StockData[]> {
   const results: StockData[] = [];
 
@@ -140,9 +133,12 @@ export async function fetchMultipleStockData(symbols: string[]): Promise<StockDa
     const data = await fetchStockData(symbol, provider);
     results.push(data);
 
-    // Throttle to 60 calls per 3 minutes
-    if ((i + 1) % 60 === 0) await sleep(180_000);
-    else await sleep(REQUEST_DELAY);
+    // Throttle: 60 calls per 3 minutes
+    if ((i + 1) % 60 === 0) {
+      await sleep(180_000); // 3 min
+    } else {
+      await sleep(REQUEST_DELAY); // 3 sec
+    }
   }
 
   return results;
