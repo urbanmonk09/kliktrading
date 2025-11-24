@@ -5,21 +5,22 @@ export interface StockData {
   symbol: string;
   current: number;
   previousClose: number;
-  prices?: number[];
-  highs?: number[];
-  lows?: number[];
-  volumes?: number[];
+  prices: number[];
+  highs: number[];
+  lows: number[];
+  volumes: number[];
   error?: string;
 }
 
 // ---------------- ENV KEYS ----------------
 const FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY || "";
+const YAHOO_RAPIDAPI_KEY = process.env.NEXT_PUBLIC_YAHOO_RAPIDAPI_KEY || "";
 
 // ---------------- RATE LIMIT ----------------
-const REQUEST_DELAY = 3000; // 60 calls per 3 mins ~ 3s per call
+const REQUEST_DELAY = 3000;
 const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
 
-// ---------------- GENERIC ERROR RESPONSE ----------------
+// ---------------- ERROR RESPONSE ----------------
 const errorResponse = (symbol: string, msg: string): StockData => ({
   symbol,
   current: 0,
@@ -33,16 +34,9 @@ const errorResponse = (symbol: string, msg: string): StockData => ({
 
 // ---------------- SYMBOL NORMALIZER ----------------
 function formatSymbol(symbol: string) {
-  let s = symbol.replace(/^NSE:/, "").replace(/\s+/g, "");
-
-  // Crypto goes to Finnhub
-  if (s.includes("BTC") || s.includes("ETH")) return s;
-
-  // Index support
-  if (s.startsWith("^")) return s;
-
-  // NSE extension
-  return `${s}.NS`;
+  if (symbol.includes("BTC") || symbol.includes("ETH")) return symbol;
+  if (symbol.startsWith("^")) return symbol;
+  return symbol.includes(".") ? symbol : `${symbol}.NS`;
 }
 
 // ---------------- YAHOO FINANCE ----------------
@@ -50,33 +44,57 @@ async function fetchYahoo(symbol: string): Promise<StockData> {
   try {
     const formatted = formatSymbol(symbol);
 
-    const response = await fetch("/api/yahooStock", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbols: [formatted] }),
-    });
+    // Fetch quotes
+    const res = await fetch(
+      `https://yh-finance.p.rapidapi.com/market/v2/get-quotes?region=IN&symbols=${formatted}`,
+      {
+        method: "GET",
+        headers: {
+          "X-RapidAPI-Key": YAHOO_RAPIDAPI_KEY,
+          "X-RapidAPI-Host": "yh-finance.p.rapidapi.com",
+        },
+      }
+    );
 
-    if (!response.ok) {
-      return errorResponse(symbol, `Yahoo route failed (${response.status})`);
+    if (!res.ok) return errorResponse(symbol, `Yahoo quote failed (${res.status})`);
+    const json = await res.json();
+    const entry = json.quoteResponse?.result?.[0];
+    if (!entry) return errorResponse(symbol, "Yahoo quote missing");
+
+    const current = entry.regularMarketPrice ?? 0;
+    const previousClose = entry.regularMarketPreviousClose ?? current;
+
+    // Fetch historical OHLC
+    const histRes = await fetch(
+      `https://yh-finance.p.rapidapi.com/stock/v3/get-historical-data?symbol=${formatted}&region=IN`,
+      {
+        method: "GET",
+        headers: {
+          "X-RapidAPI-Key": YAHOO_RAPIDAPI_KEY,
+          "X-RapidAPI-Host": "yh-finance.p.rapidapi.com",
+        },
+      }
+    );
+
+    let prices: number[] = [];
+    let highs: number[] = [];
+    let lows: number[] = [];
+    let volumes: number[] = [];
+
+    if (histRes.ok) {
+      const histJson = await histRes.json();
+      const histData = histJson.prices ?? [];
+      for (const day of histData) {
+        if (day.close && day.open && day.high && day.low && day.volume) {
+          prices.push(day.close);
+          highs.push(day.high);
+          lows.push(day.low);
+          volumes.push(day.volume);
+        }
+      }
     }
 
-    const json = await response.json();
-    const entry = json[formatted] || json[symbol];
-    if (!entry) return errorResponse(symbol, "No Yahoo data found");
-
-    const previousClose = entry.previousClose || entry.close || entry.regularMarketPreviousClose || 0;
-    const current = entry.current && entry.current > 0 ? entry.current : previousClose;
-
-    return {
-      symbol,
-      current,
-      previousClose,
-      prices: entry.prices ?? [],
-      highs: entry.highs ?? [],
-      lows: entry.lows ?? [],
-      volumes: entry.volumes ?? [],
-      error: "",
-    };
+    return { symbol, current, previousClose, prices, highs, lows, volumes, error: "" };
   } catch (err) {
     console.error(`Yahoo fetch error for ${symbol}`, err);
     return errorResponse(symbol, "Yahoo fetch failed");
@@ -118,7 +136,7 @@ export async function fetchStockData(symbol: string, provider?: Provider): Promi
   return selectedProvider === "finnhub" ? fetchFinnhub(symbol) : fetchYahoo(symbol);
 }
 
-// ---------------- MULTIPLE SYMBOLS (parallel + throttling) ----------------
+// ---------------- MULTIPLE SYMBOLS ----------------
 export async function fetchMultipleStockData(symbols: string[]): Promise<StockData[]> {
   const results: StockData[] = [];
 
@@ -130,7 +148,7 @@ export async function fetchMultipleStockData(symbols: string[]): Promise<StockDa
     const data = await fetchStockData(symbol, provider);
     results.push(data);
 
-    // Throttle to 60 calls per 3 minutes
+    // Throttle
     if ((i + 1) % 60 === 0) await sleep(180_000);
     else await sleep(REQUEST_DELAY);
   }

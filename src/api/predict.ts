@@ -19,14 +19,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     for (const symbol of WATCHLIST) {
       console.log(`[Predict] Fetching data for ${symbol}`);
+
       let stock: StockData | null = null;
 
       try {
-        stock = await fetchStockData(symbol, "finnhub");
+        // Use Yahoo for stocks, Finnhub for crypto/commodities
+        const provider = symbol.includes("USDT") || symbol === "XAUUSD" ? "finnhub" : "yahoo";
+        stock = await fetchStockData(symbol, provider);
 
         if (stock) {
           stock.current = stock.current ?? 0;
-          stock.previousClose = stock.previousClose ?? stock.current; // ✅ always present
+          stock.previousClose = stock.previousClose ?? stock.current;
           stock.prices = stock.prices ?? [];
           stock.highs = stock.highs ?? [];
           stock.lows = stock.lows ?? [];
@@ -51,8 +54,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         confidence: signalResult.confidence,
         explanation: signalResult.explanation,
         price: stock.current,
-        previousClose: stock.previousClose, // ✅ required field added
-        type: symbol.includes("USDT") ? "crypto" : symbol === "XAUUSD" ? "commodity" : "stock",
+        previousClose: stock.previousClose,
+        type: symbol.includes("USDT")
+          ? "crypto"
+          : symbol === "XAUUSD"
+          ? "commodity"
+          : "stock",
         stoploss: signalResult.stoploss ?? stock.current,
         targets: signalResult.targets ?? [stock.current],
         hitStatus: signalResult.hitStatus ?? "ACTIVE",
