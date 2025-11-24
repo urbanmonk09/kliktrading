@@ -3,14 +3,13 @@
 
 import React, { useEffect, useState } from "react";
 
-// Props interface
 export interface StockCardProps {
   symbol: string;
   signal: "BUY" | "SELL" | "HOLD";
   confidence: number;
   explanation: string;
   price?: number;
-  previousClose?: number; // optional previous close
+  previousClose?: number;
   type: "stock" | "index" | "crypto" | "commodity";
   stoploss?: number;
   targets?: number[];
@@ -19,7 +18,6 @@ export interface StockCardProps {
   hitStatus?: "ACTIVE" | "TARGET ✅" | "STOP ❌";
 }
 
-// Component
 export default function StockCard({
   symbol,
   signal,
@@ -33,12 +31,12 @@ export default function StockCard({
   support,
   resistance,
   hitStatus = "ACTIVE",
-}: StockCardProps): JSX.Element {
-
-  // Display signal override
+}: StockCardProps) {
+  // Display signal text
   const displaySignal =
     signal === "BUY" ? "LONG" : signal === "SELL" ? "SHORT" : "HOLD";
 
+  // Adjust confidence
   const adjustedConfidence =
     signal === "HOLD"
       ? 50
@@ -50,6 +48,7 @@ export default function StockCard({
 
   const [animatedValue, setAnimatedValue] = useState(adjustedConfidence);
 
+  // Animate confidence
   useEffect(() => {
     let rafId: number;
     const animate = () => {
@@ -75,7 +74,6 @@ export default function StockCard({
 
   return (
     <div className="bg-white p-4 rounded-lg shadow flex items-center gap-4">
-
       {/* Confidence Donut */}
       <div className="w-16 h-16 relative flex-shrink-0">
         <svg viewBox="0 0 36 36" className="w-full h-full">
@@ -122,10 +120,13 @@ export default function StockCard({
         </div>
 
         <p className="text-sm">
-          Price: <span className="font-medium">{price.toFixed(2)}</span> | Prev Close: <span className="font-medium">{previousClose.toFixed(2)}</span>
+          Price: <span className="font-medium">{price.toFixed(2)}</span> | Prev
+          Close: <span className="font-medium">{previousClose.toFixed(2)}</span>
         </p>
 
-        <p className="text-sm">Stoploss: <span className="font-medium">{stoploss.toFixed(2)}</span></p>
+        <p className="text-sm">
+          Stoploss: <span className="font-medium">{stoploss.toFixed(2)}</span>
+        </p>
 
         {targets.length > 0 && (
           <p className="text-sm">
@@ -133,19 +134,31 @@ export default function StockCard({
           </p>
         )}
 
-        {support !== undefined && <p className="text-sm">Support: {support.toFixed(2)}</p>}
-        {resistance !== undefined && <p className="text-sm">Resistance: {resistance.toFixed(2)}</p>}
+        {support !== undefined && (
+          <p className="text-sm">Support: {support.toFixed(2)}</p>
+        )}
+
+        {resistance !== undefined && (
+          <p className="text-sm">Resistance: {resistance.toFixed(2)}</p>
+        )}
 
         {hitStatus && (
-          <p className={`text-sm font-semibold ${
-            hitStatus === "TARGET ✅" ? "text-green-600" :
-            hitStatus === "STOP ❌" ? "text-red-600" : "text-gray-600"
-          }`}>
+          <p
+            className={`text-sm font-semibold ${
+              hitStatus === "TARGET ✅"
+                ? "text-green-600"
+                : hitStatus === "STOP ❌"
+                ? "text-red-600"
+                : "text-gray-600"
+            }`}
+          >
             {hitStatus}
           </p>
         )}
 
-        {explanation && <p className="text-xs text-gray-500 mt-1">{explanation}</p>}
+        {explanation && (
+          <p className="text-xs text-gray-500 mt-1">{explanation}</p>
+        )}
       </div>
     </div>
   );
