@@ -17,19 +17,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const results: StockDisplay[] = [];
 
-    // Loop through the watchlist
     for (const symbol of WATCHLIST) {
       console.log(`[Predict] Fetching data for ${symbol}`);
-
       let stock: StockData | null = null;
 
       try {
         stock = await fetchStockData(symbol, "finnhub");
 
-        // Ensure numeric defaults and valid data
         if (stock) {
           stock.current = stock.current ?? 0;
-          stock.previousClose = stock.previousClose ?? stock.current;
+          stock.previousClose = stock.previousClose ?? stock.current; // ✅ always present
           stock.prices = stock.prices ?? [];
           stock.highs = stock.highs ?? [];
           stock.lows = stock.lows ?? [];
@@ -37,10 +34,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         }
       } catch (err) {
         console.error(`[Predict] Failed to fetch data for ${symbol}:`, err);
-        continue; // Skip this symbol if data fetching fails
+        continue;
       }
 
-      // Make sure data exists before proceeding
       if (!stock) {
         console.warn(`[Predict] Skipping ${symbol} due to invalid data.`);
         continue;
@@ -55,10 +51,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         confidence: signalResult.confidence,
         explanation: signalResult.explanation,
         price: stock.current,
+        previousClose: stock.previousClose, // ✅ required field added
         type: symbol.includes("USDT") ? "crypto" : symbol === "XAUUSD" ? "commodity" : "stock",
-        stoploss: signalResult.stoploss,
-        targets: signalResult.targets,
-        hitStatus: signalResult.hitStatus,
+        stoploss: signalResult.stoploss ?? stock.current,
+        targets: signalResult.targets ?? [stock.current],
+        hitStatus: signalResult.hitStatus ?? "ACTIVE",
       };
 
       console.log(`[Predict] Result for ${symbol}:`, display);
